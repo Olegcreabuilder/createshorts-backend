@@ -511,6 +511,8 @@ app.post('/api/analyze-video', async (req, res) => {
       video: {
         id: videoData.id,
         title: videoData.title,
+        thumbnail: videoData.cover || videoData.origin_cover,
+        duration: videoData.duration,
         views: videoData.play_count,
         likes: videoData.digg_count,
         comments: videoData.comment_count,
@@ -528,49 +530,71 @@ app.post('/api/analyze-video', async (req, res) => {
 // Fonction pour analyser une vidéo avec l'IA
 async function analyzeVideoWithAI(videoData) {
   try {
+    // Calculer des métriques de performance
+    const views = videoData.play_count || 0;
+    const likes = videoData.digg_count || 0;
+    const comments = videoData.comment_count || 0;
+    const shares = videoData.share_count || 0;
+    
+    const engagementRate = views > 0 ? (((likes + comments + shares) / views) * 100).toFixed(2) : 0;
+    const likeRate = views > 0 ? ((likes / views) * 100).toFixed(2) : 0;
+    
     const prompt = `Tu es un expert en analyse de vidéos TikTok. Analyse cette vidéo et fournis un rapport détaillé.
 
 **Informations de la vidéo:**
 - Titre: "${videoData.title || 'Sans titre'}"
-- Vues: ${videoData.play_count?.toLocaleString() || 0}
-- Likes: ${videoData.digg_count?.toLocaleString() || 0}
-- Commentaires: ${videoData.comment_count?.toLocaleString() || 0}
-- Partages: ${videoData.share_count?.toLocaleString() || 0}
+- Vues: ${views.toLocaleString()}
+- Likes: ${likes.toLocaleString()}
+- Commentaires: ${comments.toLocaleString()}
+- Partages: ${shares.toLocaleString()}
 - Durée: ${videoData.duration || 0} secondes
+- Taux d'engagement: ${engagementRate}%
+- Ratio likes/vues: ${likeRate}%
+
+**Critères d'évaluation du score (sur 10):**
+- 0-2: Très faible performance (< 100 vues, engagement < 1%)
+- 2-4: Faible performance (100-1K vues, engagement 1-3%)
+- 4-6: Performance moyenne (1K-10K vues, engagement 3-5%)
+- 6-7.5: Bonne performance (10K-50K vues, engagement 5-8%)
+- 7.5-9: Très bonne performance (50K-200K vues, engagement 8-12%)
+- 9-10: Excellente performance (>200K vues, engagement >12%)
+
+**IMPORTANT:** Le score doit refléter la VRAIE performance. Une vidéo avec ${views.toLocaleString()} vues et ${engagementRate}% d'engagement ne peut PAS avoir 8.5/10 sauf si elle dépasse vraiment 50K vues avec un bon engagement.
 
 **Format de réponse attendu (JSON strict):**
 {
-  "summary": "Un paragraphe résumant la performance et le contenu de la vidéo.",
+  "summary": "Un paragraphe résumant la performance et le contenu de la vidéo (2-3 phrases maximum).",
   "strengths": [
-    "Point fort 1 - Description détaillée",
-    "Point fort 2 - Description détaillée",
-    "Point fort 3 - Description détaillée"
+    "Point fort 1 - Description détaillée et spécifique aux métriques",
+    "Point fort 2 - Description détaillée et spécifique aux métriques",
+    "Point fort 3 - Description détaillée et spécifique aux métriques"
   ],
   "improvements": [
-    "Point d'amélioration 1 - Suggestion concrète",
-    "Point d'amélioration 2 - Suggestion concrète",
-    "Point d'amélioration 3 - Suggestion concrète"
+    "Point d'amélioration 1 - Suggestion concrète basée sur les métriques",
+    "Point d'amélioration 2 - Suggestion concrète basée sur les métriques",
+    "Point d'amélioration 3 - Suggestion concrète basée sur les métriques"
   ],
   "recommendations": [
-    "Recommandation 1 - Action concrète",
-    "Recommandation 2 - Action concrète",
-    "Recommandation 3 - Action concrète"
+    "Recommandation 1 - Action concrète et mesurable",
+    "Recommandation 2 - Action concrète et mesurable",
+    "Recommandation 3 - Action concrète et mesurable"
   ],
-  "score": 8.5
+  "score": 6.5
 }
 
 **Instructions:**
-1. Base ton analyse sur les métriques de performance
-2. Sois spécifique et actionnable
-3. Fournis un score entre 0 et 10
-4. RETOURNE UNIQUEMENT LE JSON`;
+1. Base ton analyse UNIQUEMENT sur les métriques réelles
+2. Le score doit être RÉALISTE et correspondre aux critères ci-dessus
+3. Sois honnête : une vidéo avec peu de vues = score bas
+4. Sois spécifique et actionnable
+5. RETOURNE UNIQUEMENT LE JSON`;
 
     const completion = await openai.chat.completions.create({
       model: 'gpt-4o-mini',
       messages: [
         {
           role: 'system',
-          content: 'Tu es un expert en analyse de vidéos TikTok. Tu fournis toujours des réponses au format JSON valide.'
+          content: 'Tu es un expert en analyse de vidéos TikTok. Tu fournis toujours des scores RÉALISTES basés sur les vraies performances. Tu ne donnes jamais de scores élevés par défaut. Tu fournis toujours des réponses au format JSON valide.'
         },
         {
           role: 'user',
@@ -587,29 +611,38 @@ async function analyzeVideoWithAI(videoData) {
   } catch (error) {
     console.error('Erreur analyse IA vidéo:', error);
     
-    // Retour par défaut
+    // Retour par défaut AVEC SCORE RÉALISTE
+    const views = videoData.play_count || 0;
+    let defaultScore = 5.0;
+    
+    if (views < 100) defaultScore = 2.0;
+    else if (views < 1000) defaultScore = 3.5;
+    else if (views < 10000) defaultScore = 5.0;
+    else if (views < 50000) defaultScore = 6.5;
+    else if (views < 200000) defaultScore = 7.5;
+    else defaultScore = 8.5;
+    
     return {
       summary: "Analyse basée sur les métriques de performance de la vidéo.",
       strengths: [
-        "Bon taux d'engagement",
-        "Format adapté à TikTok",
-        "Métriques positives"
+        "Contenu publié sur TikTok",
+        "Format adapté à la plateforme",
+        "Vidéo accessible au public"
       ],
       improvements: [
-        "Optimiser le titre",
-        "Améliorer le hook",
-        "Augmenter l'engagement"
+        "Optimiser le titre pour plus de clics",
+        "Améliorer le hook des 3 premières secondes",
+        "Augmenter la fréquence de publication"
       ],
       recommendations: [
-        "Créer du contenu similaire",
-        "Analyser les commentaires",
-        "Tester différents horaires"
+        "Analyser les heures de publication optimales",
+        "Créer du contenu similaire aux vidéos performantes",
+        "Interagir davantage avec les commentaires"
       ],
-      score: 7.0
+      score: defaultScore
     };
   }
 }
-
 
 // ============================================
 // ROUTE DE TEST TIKTOK
