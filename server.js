@@ -30,7 +30,7 @@ app.use(express.json());
 
 // Initialisation Supabase avec SERVICE_ROLE_KEY
 const supabase = createClient(
-  process.env.REACT_APP_SUPABASE_URL,
+  process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY // ⚠️ Service Role Key côté serveur
 );
 
