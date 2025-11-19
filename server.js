@@ -830,23 +830,63 @@ app.post('/api/tiktok-account-stats', async (req, res) => {
         likes: v.digg_count || 0
       }));
 
-    // 11. Construire la réponse
-    const analysisData = {
-      username: cleanUsername,
-      viralityScore: parseFloat(viralityScore),
-      viralityLabel,
-      growthPotential,
-      growthLabel,
-      stats: {
-        engagementRate: parseFloat(engagementRate),
-        followers,
-        avgViews
+   // 11. Générer les Points Forts avec OpenAI
+let strengths = [
+  'Contenu authentique et inspirant qui crée une connexion émotionnelle',
+  'Cohérence visuelle excellente avec une identité de marque forte',
+  `Taux d'engagement de ${engagementRate}% ${engRate >= 4 ? 'au-dessus' : 'proche'} de la moyenne`,
+  'Publication régulière qui fidélise l\'audience'
+];
+
+try {
+  const strengthsCompletion = await openai.chat.completions.create({
+    model: 'gpt-4o-mini',
+    messages: [
+      {
+        role: 'system',
+        content: 'Tu es un expert en analyse de comptes TikTok. Génère 4 points forts spécifiques et détaillés en français basés sur les vraies données du compte. Chaque point doit être une phrase complète. Retourne uniquement les 4 points forts, un par ligne, sans numérotation.'
       },
-      niche,
-      summary,
-      topVideos,
-      recommendations
-    };
+      {
+        role: 'user',
+        content: `Compte TikTok @${cleanUsername}. Niche: ${niche}. Stats: ${followers} abonnés, ${avgViews} vues moyennes, ${engagementRate}% engagement, ${userInfo.videoCount} vidéos. Descriptions des vidéos: ${videoDescriptions.substring(0, 500)}. Génère 4 points forts précis et valorisants basés sur ces données réelles.`
+      }
+    ],
+    max_tokens: 300,
+    temperature: 0.7
+  });
+
+  const strengthsText = strengthsCompletion.choices[0]?.message?.content?.trim();
+  if (strengthsText) {
+    const parsedStrengths = strengthsText.split('\n').filter(s => s.trim().length > 10).map(s => s.replace(/^\d+\.\s*/, '').trim());
+    if (parsedStrengths.length >= 4) {
+      strengths = parsedStrengths.slice(0, 4);
+    }
+  }
+} catch (error) {
+  console.error('Erreur génération points forts:', error);
+}
+
+// 12. Construire la réponse avec TOUTES les stats
+const analysisData = {
+  username: cleanUsername,
+  viralityScore: parseFloat(viralityScore),
+  viralityLabel,
+  growthPotential,
+  growthLabel,
+  stats: {
+    engagementRate: parseFloat(engagementRate),
+    followers,
+    avgViews,
+    totalLikes: userInfo.heartCount || 0,
+    videoCount: userInfo.videoCount || 0,
+    following: userInfo.followingCount || 0
+  },
+  niche,
+  summary,
+  topVideos,
+  recommendations,
+  strengths
+};
 
     console.log('✅ Analyse onboarding terminée');
 
