@@ -1,11 +1,3 @@
-// 🔧 Pour React/Vite, tu dois créer un backend séparé (Express ou Netlify Functions)
-// Voici l'adaptation pour Express.js
-
-// ============================================
-// Option 1 : Backend Express.js
-// ============================================
-// Fichier : backend/server.js
-
 import express from 'express';
 import cors from 'cors';
 import { createClient } from '@supabase/supabase-js';
@@ -172,23 +164,23 @@ async function fetchTikTokUserInfo(username) {
       const userData = response.data.data;
       console.log('✅ Utilisateur trouvé:', userData.user.nickname);
       console.log('🖼️ Avatar brut:', userData.user.avatar);
-console.log('🔍 User keys:', Object.keys(userData.user));
+      console.log('🔍 User keys:', Object.keys(userData.user));
       console.log('📊 Structure complète des stats:', JSON.stringify(userData.stats, null, 2));
-  console.log('🔍 Keys des stats:', Object.keys(userData.stats || {}));
+      console.log('🔍 Keys des stats:', Object.keys(userData.stats || {}));
       
       // Adapter le format TikWM au format attendu
       return {
-  id: userData.user.id,
-  uniqueId: userData.user.unique_id || username,
-  nickname: userData.user.nickname,
-  avatarLarger: userData.user.avatarLarger,  // ✅ Déjà correct
-  avatarMedium: userData.user.avatarMedium,  // ✅ Déjà correct
-  signature: userData.user.signature,
-  followerCount: userData.stats?.followerCount || userData.stats?.follower_count || 0,
-  followingCount: userData.stats?.followingCount || userData.stats?.following_count || 0,
-  heartCount: userData.stats?.heartCount || userData.stats?.heart_count || 0,  // ✅ CORRIGÉ
-  videoCount: userData.stats?.videoCount || userData.stats?.video_count || 0,  // ✅ CORRIGÉ
-  verified: userData.user.verified || false
+        id: userData.user.id,
+        uniqueId: userData.user.unique_id || username,
+        nickname: userData.user.nickname,
+        avatarLarger: userData.user.avatarLarger,  // ✅ Déjà correct
+        avatarMedium: userData.user.avatarMedium,  // ✅ Déjà correct
+        signature: userData.user.signature,
+        followerCount: userData.stats?.followerCount || userData.stats?.follower_count || 0,
+        followingCount: userData.stats?.followingCount || userData.stats?.following_count || 0,
+        heartCount: userData.stats?.heartCount || userData.stats?.heart_count || 0,  // ✅ CORRIGÉ
+        videoCount: userData.stats?.videoCount || userData.stats?.video_count || 0,  // ✅ CORRIGÉ
+        verified: userData.user.verified || false
       };
     }
     
@@ -242,12 +234,12 @@ async function fetchTikTokUserVideos(username, maxVideos = 10) {
 async function analyzeAccountWithAI(userInfo, videos) {
   try {
     const videosData = videos.slice(0, 10).map(v => ({
-  titre: v.title || '',
-  vues: v.play_count || 0,
-  likes: v.digg_count || 0,
-  commentaires: v.comment_count || 0,
-  partages: v.share_count || 0,
-}));
+      titre: v.title || '',
+      vues: v.play_count || 0,
+      likes: v.digg_count || 0,
+      commentaires: v.comment_count || 0,
+      partages: v.share_count || 0,
+    }));
 
     const prompt = `Tu es un expert en analyse de comptes TikTok. Analyse ce compte et fournis une analyse détaillée.
 
@@ -418,7 +410,7 @@ app.get('/api/user-videos', async (req, res) => {
     const { data: account, error: accountError } = await supabase
       .from('connected_accounts')
       .select('tiktok_username, avatar_url')
-            .eq('user_id', user.id)
+      .eq('user_id', user.id)
       .eq('is_connected', true)
       .single();
 
@@ -429,8 +421,8 @@ app.get('/api/user-videos', async (req, res) => {
     console.log('🎬 Compte TikTok:', account.tiktok_username);
 
     // ⏱️ DÉLAI pour éviter le rate limit de l'API TikWM (1 req/sec max)
-console.log('⏱️ Attente de 1.5 seconde pour éviter le rate limit...');
-await new Promise(resolve => setTimeout(resolve, 1500));
+    console.log('⏱️ Attente de 1.5 seconde pour éviter le rate limit...');
+    await new Promise(resolve => setTimeout(resolve, 1500));
 
     // Récupérer les vidéos via TikWM
     const videos = await fetchTikTokUserVideos(account.tiktok_username, 10);
@@ -440,7 +432,7 @@ await new Promise(resolve => setTimeout(resolve, 1500));
     return res.status(200).json({
       success: true,
       username: account.tiktok_username,
-       avatarUrl: account.avatar_url,
+      avatarUrl: account.avatar_url,
       videos: videos.map(v => ({
         id: v.video_id,
         title: v.title || 'Sans titre',
@@ -645,6 +637,231 @@ async function analyzeVideoWithAI(videoData) {
 }
 
 // ============================================
+// ROUTE : POST /api/tiktok-account-stats (POUR ONBOARDING)
+// ============================================
+app.post('/api/tiktok-account-stats', async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    const { username } = req.body;
+    
+    if (!authHeader) {
+      return res.status(401).json({ error: 'Non authentifié' });
+    }
+
+    const token = authHeader.replace('Bearer ', '');
+    const { data: { user }, error: authError } = await supabase.auth.getUser(token);
+    
+    if (authError || !user) {
+      return res.status(401).json({ error: 'Non authentifié' });
+    }
+
+    console.log(`📊 Analyse du compte TikTok: @${username} pour onboarding`);
+
+    if (!username) {
+      return res.status(400).json({ error: 'Username TikTok requis' });
+    }
+
+    const cleanUsername = username.replace('@', '');
+
+    // ⏱️ DÉLAI pour éviter le rate limit
+    console.log('⏱️ Attente de 1.5 seconde pour éviter le rate limit...');
+    await new Promise(resolve => setTimeout(resolve, 1500));
+
+    // 1. Récupérer les infos du compte
+    const userInfo = await fetchTikTokUserInfo(cleanUsername);
+
+    if (!userInfo) {
+      return res.status(404).json({ error: 'Compte TikTok introuvable' });
+    }
+
+    console.log(`✅ Compte trouvé: ${userInfo.followerCount} followers`);
+
+    // 2. Récupérer les 10 dernières vidéos
+    const videos = await fetchTikTokUserVideos(cleanUsername, 10);
+
+    if (videos.length === 0) {
+      return res.status(404).json({ error: 'Aucune vidéo trouvée' });
+    }
+
+    console.log(`📹 ${videos.length} vidéos récupérées`);
+
+    // 3. Calculer les statistiques
+    const totalViews = videos.reduce((sum, v) => sum + (v.play_count || 0), 0);
+    const totalLikes = videos.reduce((sum, v) => sum + (v.digg_count || 0), 0);
+    const totalComments = videos.reduce((sum, v) => sum + (v.comment_count || 0), 0);
+    const totalShares = videos.reduce((sum, v) => sum + (v.share_count || 0), 0);
+    
+    const avgViews = Math.round(totalViews / videos.length);
+    const totalEngagement = totalLikes + totalComments + totalShares;
+    const engagementRate = totalViews > 0 ? ((totalEngagement / totalViews) * 100).toFixed(1) : 0;
+    const followers = userInfo.followerCount || 0;
+
+    // 4. Détecter la niche avec OpenAI
+    const videoDescriptions = videos.map(v => v.title || '').filter(t => t).join(' ');
+    
+    let niche = 'Contenu Général';
+    try {
+      const nicheCompletion = await openai.chat.completions.create({
+        model: 'gpt-4o-mini',
+        messages: [
+          {
+            role: 'system',
+            content: 'Tu es un expert en analyse de contenu TikTok. Tu dois identifier la niche principale du compte en 2-4 mots maximum en français.'
+          },
+          {
+            role: 'user',
+            content: `Analyse ces descriptions de vidéos TikTok et identifie la niche principale en 2-4 mots (ex: "Fitness & Lifestyle", "Gaming & Tech", "Cuisine & Recettes") : ${videoDescriptions.substring(0, 500)}`
+          }
+        ],
+        max_tokens: 20,
+        temperature: 0.3
+      });
+      niche = nicheCompletion.choices[0]?.message?.content?.trim() || 'Contenu Général';
+    } catch (error) {
+      console.error('Erreur détection niche:', error);
+    }
+
+    // 5. Générer le résumé du compte avec OpenAI
+    let summary = `Compte spécialisé dans ${niche} avec une audience de ${followers} abonnés. Les vidéos génèrent en moyenne ${avgViews} vues avec un taux d'engagement de ${engagementRate}%.`;
+    try {
+      const summaryCompletion = await openai.chat.completions.create({
+        model: 'gpt-4o-mini',
+        messages: [
+          {
+            role: 'system',
+            content: 'Tu es un expert en analyse de contenu TikTok. Génère un résumé détaillé du compte en 3-4 phrases en français.'
+          },
+          {
+            role: 'user',
+            content: `Compte TikTok @${cleanUsername}. Niche: ${niche}. Stats: ${followers} abonnés, ${avgViews} vues moyennes, ${engagementRate}% engagement. Descriptions des vidéos: ${videoDescriptions.substring(0, 500)}`
+          }
+        ],
+        max_tokens: 200,
+        temperature: 0.7
+      });
+      summary = summaryCompletion.choices[0]?.message?.content?.trim() || summary;
+    } catch (error) {
+      console.error('Erreur génération résumé:', error);
+    }
+
+    // 6. Générer les recommandations avec OpenAI
+    let recommendations = [
+      'Publiez régulièrement pour maintenir l\'engagement de votre audience',
+      'Utilisez des hashtags pertinents pour augmenter votre visibilité',
+      'Interagissez avec vos abonnés dans les commentaires',
+      'Analysez vos meilleures vidéos pour reproduire le succès',
+      'Testez différents formats de contenu pour diversifier votre audience'
+    ];
+
+    try {
+      const recsCompletion = await openai.chat.completions.create({
+        model: 'gpt-4o-mini',
+        messages: [
+          {
+            role: 'system',
+            content: 'Tu es un expert en croissance TikTok. Génère 5 recommandations concrètes et actionnables en français pour améliorer les performances du compte. Chaque recommandation doit être une phrase complète et spécifique. Retourne uniquement les 5 recommandations, une par ligne, sans numérotation.'
+          },
+          {
+            role: 'user',
+            content: `Compte TikTok. Niche: ${niche}. Stats: ${followers} abonnés, ${avgViews} vues moyennes, ${engagementRate}% engagement. Génère 5 recommandations pour améliorer la croissance.`
+          }
+        ],
+        max_tokens: 400,
+        temperature: 0.7
+      });
+
+      const recsText = recsCompletion.choices[0]?.message?.content?.trim();
+      if (recsText) {
+        const parsedRecs = recsText.split('\n').filter(r => r.trim().length > 10).map(r => r.replace(/^\d+\.\s*/, '').trim());
+        if (parsedRecs.length >= 5) {
+          recommendations = parsedRecs.slice(0, 5);
+        }
+      }
+    } catch (error) {
+      console.error('Erreur génération recommandations:', error);
+    }
+
+    // 7. Calculer le score de viralité (sur 10)
+    let viralityScore = 5.0;
+    const engRate = parseFloat(engagementRate);
+    
+    if (engRate >= 8) viralityScore = 9.0;
+    else if (engRate >= 6) viralityScore = 7.5;
+    else if (engRate >= 4) viralityScore = 6.5;
+    else if (engRate >= 2) viralityScore = 5.5;
+
+    // Ajuster selon les vues moyennes
+    if (avgViews > 100000) viralityScore += 0.5;
+    else if (avgViews > 50000) viralityScore += 0.3;
+    else if (avgViews < 1000) viralityScore -= 0.5;
+
+    viralityScore = Math.min(10, Math.max(1, viralityScore)).toFixed(1);
+
+    // 8. Déterminer le potentiel de croissance
+    let growthPotential = 'Moyen';
+    let growthLabel = 'Potentiel stable';
+
+    if (engRate >= 6 && avgViews > 10000) {
+      growthPotential = 'Élevé';
+      growthLabel = 'Excellent potentiel de croissance';
+    } else if (engRate >= 4 || avgViews > 5000) {
+      growthPotential = 'Bon';
+      growthLabel = 'Bon potentiel de développement';
+    } else if (engRate < 2 && avgViews < 1000) {
+      growthPotential = 'Faible';
+      growthLabel = 'Nécessite des améliorations';
+    }
+
+    // 9. Label du score de viralité
+    let viralityLabel = 'Bon potentiel';
+    const vScore = parseFloat(viralityScore);
+    if (vScore >= 8.5) viralityLabel = 'Excellent potentiel de croissance';
+    else if (vScore >= 7) viralityLabel = 'Très bon potentiel';
+    else if (vScore >= 5.5) viralityLabel = 'Potentiel moyen';
+    else viralityLabel = 'Potentiel à développer';
+
+    // 10. Formater les top 3 vidéos
+    const topVideos = videos
+      .sort((a, b) => (b.play_count || 0) - (a.play_count || 0))
+      .slice(0, 3)
+      .map(v => ({
+        title: v.title || 'Sans titre',
+        views: v.play_count || 0,
+        likes: v.digg_count || 0
+      }));
+
+    // 11. Construire la réponse
+    const analysisData = {
+      username: cleanUsername,
+      viralityScore: parseFloat(viralityScore),
+      viralityLabel,
+      growthPotential,
+      growthLabel,
+      stats: {
+        engagementRate: parseFloat(engagementRate),
+        followers,
+        avgViews
+      },
+      niche,
+      summary,
+      topVideos,
+      recommendations
+    };
+
+    console.log('✅ Analyse onboarding terminée');
+
+    res.json(analysisData);
+
+  } catch (error) {
+    console.error('❌ Erreur analyse TikTok onboarding:', error);
+    res.status(500).json({ 
+      error: 'Erreur lors de l\'analyse du compte',
+      details: error.message 
+    });
+  }
+});
+
+// ============================================
 // ROUTE DE TEST TIKTOK
 // ============================================
 app.get('/api/test-tiktok/:username', async (req, res) => {
@@ -666,7 +883,6 @@ app.get('/api/test-tiktok/:username', async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
-
 
 // Route de test
 app.get('/api/health', (req, res) => {
