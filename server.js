@@ -72,20 +72,48 @@ app.post('/api/connect-tiktok', async (req, res) => {
 
     console.log('🤖 Analyse IA terminée');
 
-    // 4. Calculer les statistiques
+    // 4. Calculer les statistiques (AVEC TOUTES LES NOUVELLES STATS)
     const stats = calculateStats(userInfo, userVideos);
 
+    // ⭐ EXTRACTION DES STATS POUR LA BDD
+    const { 
+      viralityScore, 
+      viralityLabel, 
+      growthPotential, 
+      growthLabel,
+      growthColor,
+      engagementRate,
+      avgViews,
+      avgLikes,        // ⭐ AJOUT avg_likes
+      ...otherStats 
+    } = stats;
 
-console.log('💾 Données à sauvegarder:', {
-  username,
-  avatar_url: userInfo.avatarLarger || userInfo.avatarMedium,
-  followers_count: userInfo.followerCount,
-  following_count: userInfo.followingCount,
-  total_likes: userInfo.heartCount,
-  video_count: userInfo.videoCount,
-});
+    console.log('📊 Stats calculées:', {
+      viralityScore,
+      viralityLabel,
+      growthPotential,
+      growthLabel,
+      growthColor,
+      engagementRate,
+      avgViews,
+      avgLikes         // ⭐ Log avg_likes
+    });
 
-    // 5. Sauvegarder dans Supabase
+    console.log('💾 Données à sauvegarder:', {
+      username,
+      avatar_url: userInfo.avatarLarger || userInfo.avatarMedium,
+      followers_count: userInfo.followerCount,
+      following_count: userInfo.followingCount,
+      total_likes: userInfo.heartCount,
+      video_count: userInfo.videoCount,
+      virality_score: viralityScore,
+      growth_potential: growthPotential,
+      engagement_rate: engagementRate,
+      avg_views: avgViews,
+      avg_likes: avgLikes  // ⭐ Log avg_likes
+    });
+
+    // 5. Sauvegarder dans Supabase (AVEC LES NOUVELLES COLONNES)
     const { data: savedAccount, error: dbError } = await supabase
       .from('connected_accounts')
       .upsert({
@@ -100,12 +128,23 @@ console.log('💾 Données à sauvegarder:', {
         total_likes: userInfo.heartCount,
         video_count: userInfo.videoCount,
         verified: userInfo.verified || false,
+        
+        // ⭐ AJOUT DES NOUVELLES COLONNES
+        virality_score: viralityScore,
+        virality_label: viralityLabel,
+        growth_potential: growthPotential,
+        growth_label: growthLabel,
+        growth_color: growthColor,
+        engagement_rate: engagementRate,
+        avg_views: avgViews,
+        avg_likes: avgLikes,  // ⭐ SAUVEGARDE avg_likes
+        
         niche: aiAnalysis.niche,
         account_summary: aiAnalysis.resume,
         strengths: aiAnalysis.points_forts,
         weaknesses: aiAnalysis.points_faibles,
         recommendations: aiAnalysis.recommandations,
-        stats: stats,
+        stats: otherStats, // Les autres stats (avgComments, avgShares, etc.)
         last_sync: new Date().toISOString(),
         is_connected: true,
       }, {
@@ -119,6 +158,7 @@ console.log('💾 Données à sauvegarder:', {
 
     console.log('💾 Compte sauvegardé en base de données');
 
+    // 6. Retourner au frontend (AVEC LES NOUVELLES STATS)
     return res.status(200).json({
       success: true,
       account: {
@@ -131,9 +171,20 @@ console.log('💾 Données à sauvegarder:', {
         videoCount: userInfo.videoCount,
         bio: userInfo.signature,
         verified: userInfo.verified,
+        
+        // ⭐ AJOUT DES NOUVELLES STATS
+        viralityScore,
+        viralityLabel,
+        growthPotential,
+        growthLabel,
+        growthColor,
+        engagementRate,
+        avgViews,
+        avgLikes,        // ⭐ RETOUR avg_likes au frontend
+        
         niche: aiAnalysis.niche,
         analysis: aiAnalysis,
-        stats,
+        stats: otherStats,
       },
     });
 
@@ -173,13 +224,13 @@ async function fetchTikTokUserInfo(username) {
         id: userData.user.id,
         uniqueId: userData.user.unique_id || username,
         nickname: userData.user.nickname,
-        avatarLarger: userData.user.avatarLarger,  // ✅ Déjà correct
-        avatarMedium: userData.user.avatarMedium,  // ✅ Déjà correct
+        avatarLarger: userData.user.avatarLarger,
+        avatarMedium: userData.user.avatarMedium,
         signature: userData.user.signature,
         followerCount: userData.stats?.followerCount || userData.stats?.follower_count || 0,
         followingCount: userData.stats?.followingCount || userData.stats?.following_count || 0,
-        heartCount: userData.stats?.heartCount || userData.stats?.heart_count || 0,  // ✅ CORRIGÉ
-        videoCount: userData.stats?.videoCount || userData.stats?.video_count || 0,  // ✅ CORRIGÉ
+        heartCount: userData.stats?.heartCount || userData.stats?.heart_count || 0,
+        videoCount: userData.stats?.videoCount || userData.stats?.video_count || 0,
         verified: userData.user.verified || false
       };
     }
@@ -336,7 +387,7 @@ ${videosData.map((v, i) => `${i + 1}. "${v.titre}" - ${v.vues.toLocaleString()} 
   }
 }
 
-// Fonction pour calculer les statistiques
+// ⭐ FONCTION calculateStats COMPLÈTE (NOUVELLE FORMULE)
 function calculateStats(userInfo, videos) {
   if (!videos || videos.length === 0) {
     return {
@@ -345,11 +396,17 @@ function calculateStats(userInfo, videos) {
       avgComments: 0,
       avgShares: 0,
       engagementRate: 0,
+      viralityScore: 0,
+      viralityLabel: 'Aucune donnée disponible',
+      growthPotential: 'Inconnu',
+      growthLabel: 'Données insuffisantes',
+      growthColor: 'gray',
       topVideo: null,
       top3Videos: []
     };
   }
 
+  // ✅ CALCULS DE BASE
   const totalViews = videos.reduce((sum, v) => sum + (v.play_count || 0), 0);
   const totalLikes = videos.reduce((sum, v) => sum + (v.digg_count || 0), 0);
   const totalComments = videos.reduce((sum, v) => sum + (v.comment_count || 0), 0);
@@ -361,11 +418,13 @@ function calculateStats(userInfo, videos) {
   const avgShares = Math.round(totalShares / videos.length);
 
   const totalEngagement = totalLikes + totalComments + totalShares;
-  const engagementRate = userInfo.followerCount > 0 
-    ? ((totalEngagement / videos.length) / userInfo.followerCount * 100).toFixed(2)
+  
+  // ✅ TAUX D'ENGAGEMENT (basé sur les vues, pas les followers)
+  const engagementRate = totalViews > 0 
+    ? ((totalEngagement / totalViews) * 100).toFixed(1)
     : 0;
 
-  // Trier les vidéos par nombre de vues (décroissant)
+  // Top 3 vidéos
   const sortedVideos = [...videos].sort((a, b) => (b.play_count || 0) - (a.play_count || 0));
   const top3Videos = sortedVideos.slice(0, 3).map(v => ({
     title: v.title,
@@ -374,14 +433,99 @@ function calculateStats(userInfo, videos) {
     url: `https://www.tiktok.com/@${userInfo.uniqueId}/video/${v.video_id}`
   }));
 
+  // ⭐ NOUVELLE FORMULE - SCORE DE VIRALITÉ (sur 10)
+  // 60% Vues + 30% Engagement + 10% Consistance
+  
+  // 1. SCORE VUES (6 points max) - Basé sur ratio vues/followers
+  const ratio = userInfo.followerCount > 0 ? avgViews / userInfo.followerCount : 0;
+  let viewsScore = 0;
+  
+  if (ratio >= 50) viewsScore = 6;
+  else if (ratio >= 30) viewsScore = 5.5;
+  else if (ratio >= 10) viewsScore = 5;
+  else if (ratio >= 5) viewsScore = 4;
+  else if (ratio >= 2) viewsScore = 3;
+  else if (ratio >= 1) viewsScore = 2;
+  else if (ratio >= 0.5) viewsScore = 1;
+  else viewsScore = 0.5;
+
+  // 2. SCORE ENGAGEMENT (3 points max)
+  const engRate = parseFloat(engagementRate);
+  let engagementScore = 0;
+  
+  if (engRate >= 8) engagementScore = 3;
+  else if (engRate >= 6) engagementScore = 2.5;
+  else if (engRate >= 4) engagementScore = 2;
+  else if (engRate >= 3) engagementScore = 1.5;
+  else if (engRate >= 2) engagementScore = 1;
+  else if (engRate >= 1) engagementScore = 0.7;
+  else engagementScore = 0.5;
+
+  // 3. SCORE CONSISTANCE (1 point max)
+  const top3Average = top3Videos.length > 0 
+    ? top3Videos.reduce((sum, v) => sum + v.views, 0) / top3Videos.length 
+    : avgViews;
+  const consistency = top3Average > 0 ? avgViews / top3Average : 0;
+  let consistencyScore = 0;
+  
+  if (consistency >= 0.6) consistencyScore = 1;
+  else if (consistency >= 0.4) consistencyScore = 0.8;
+  else if (consistency >= 0.25) consistencyScore = 0.6;
+  else if (consistency >= 0.15) consistencyScore = 0.4;
+  else consistencyScore = 0.2;
+
+  // SCORE TOTAL
+  const viralityScore = (viewsScore + engagementScore + consistencyScore).toFixed(1);
+
+  // ⭐ LABEL DU SCORE DE VIRALITÉ (NOUVEAU BARÈME)
+  let viralityLabel = '';
+  const vScore = parseFloat(viralityScore);
+  
+  if (vScore >= 8) viralityLabel = 'Excellent potentiel viral';
+  else if (vScore >= 6) viralityLabel = 'Bon potentiel viral';
+  else if (vScore >= 4) viralityLabel = 'Potentiel viral moyen';
+  else viralityLabel = 'Potentiel viral limité';
+
+  // ⭐ POTENTIEL DE CROISSANCE (basé sur vues + engagement)
+  let growthPotential = 'Moyen';
+  let growthLabel = 'Potentiel stable';
+  let growthColor = 'yellow';
+
+  if (ratio >= 30 && engRate >= 4) {
+    growthPotential = 'Excellent';
+    growthLabel = 'Excellent potentiel de croissance';
+    growthColor = 'emerald';
+  } else if (ratio >= 10 && engRate >= 2) {
+    growthPotential = 'Très bon';
+    growthLabel = 'Très bon potentiel de croissance';
+    growthColor = 'green';
+  } else if (ratio >= 5 || engRate >= 2) {
+    growthPotential = 'Bon';
+    growthLabel = 'Bon potentiel de développement';
+    growthColor = 'lime';
+  } else if (ratio < 1 && engRate < 1) {
+    growthPotential = 'Faible';
+    growthLabel = 'Nécessite des améliorations';
+    growthColor = 'orange';
+  }
+
+  // ✅ RETOURNER TOUTES LES STATS
   return {
+    // Stats de base
     avgViews,
     avgLikes,
     avgComments,
     avgShares,
     engagementRate: parseFloat(engagementRate),
     topVideo: top3Videos[0] || null,
-    top3Videos: top3Videos
+    top3Videos,
+    
+    // ⭐ NOUVELLES STATS
+    viralityScore: parseFloat(viralityScore),
+    viralityLabel,
+    growthPotential,
+    growthLabel,
+    growthColor
   };
 }
 
