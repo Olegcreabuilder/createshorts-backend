@@ -1077,6 +1077,74 @@ app.get('/api/health', (req, res) => {
   });
 });
 
+app.post('/api/analyze-tracked-account', async (req, res) => {
+  try {
+    const { username } = req.body;
+
+    if (!username) {
+      return res.status(400).json({ error: 'Username requis' });
+    }
+
+    const cleanUsername = username.replace('@', '');
+
+    console.log(`📊 Analyse du compte tracké: @${cleanUsername}`);
+
+    // 1. Récupérer les infos du compte
+    const userInfo = await fetchTikTokUserInfo(cleanUsername);
+
+    if (!userInfo) {
+      return res.status(404).json({ error: 'Compte TikTok introuvable' });
+    }
+
+    console.log(`✅ Compte trouvé: ${userInfo.followerCount} followers`);
+
+    // 2. Récupérer les vidéos
+    const videos = await fetchTikTokUserVideos(cleanUsername, 10);
+
+    console.log(`📹 ${videos.length} vidéos récupérées`);
+
+    // 3. Calculer les stats avec la même fonction que connect-tiktok
+    const stats = calculateStats(userInfo, videos);
+
+    console.log('📊 Stats calculées:', {
+      viralityScore: stats.viralityScore,
+      viralityLabel: stats.viralityLabel,
+      growthPotential: stats.growthPotential,
+      growthLabel: stats.growthLabel,
+      growthColor: stats.growthColor
+    });
+
+    // 4. Retourner les données
+    return res.status(200).json({
+      success: true,
+      account: {
+        username: userInfo.uniqueId || cleanUsername,
+        nickname: userInfo.nickname,
+        avatarUrl: userInfo.avatarLarger || userInfo.avatarMedium,
+        followers: userInfo.followerCount,
+        following: userInfo.followingCount,
+        totalLikes: userInfo.heartCount,
+        videoCount: userInfo.videoCount,
+        
+        // Stats calculées
+        viralityScore: stats.viralityScore,
+        viralityLabel: stats.viralityLabel,
+        growthPotential: stats.growthPotential,
+        growthLabel: stats.growthLabel,
+        growthColor: stats.growthColor,
+        engagementRate: stats.engagementRate,
+        avgViews: stats.avgViews,
+        avgLikes: stats.avgLikes
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Erreur analyse compte tracké:', error);
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+
 // Démarrer le serveur
 app.listen(PORT, () => {
   console.log(`✅ Backend CreateShorts démarré sur le port ${PORT}`);
