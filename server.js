@@ -292,24 +292,50 @@ async function analyzeAccountWithAI(userInfo, videos) {
       partages: v.share_count || 0,
     }));
 
-    const prompt = `Tu es un expert en analyse de comptes TikTok. Analyse ce compte et fournis une analyse détaillée.
+    // ⭐ CALCULS POUR LE PROMPT
+    const avgViews = videosData.length > 0 
+      ? Math.round(videosData.reduce((sum, v) => sum + v.vues, 0) / videosData.length)
+      : 0;
+    
+    const avgLikes = videosData.length > 0
+      ? Math.round(videosData.reduce((sum, v) => sum + v.likes, 0) / videosData.length)
+      : 0;
 
-**Informations du compte:**
-- Username: @${userInfo.uniqueId}
-- Nom: ${userInfo.nickname}
-- Bio: "${userInfo.signature || 'Aucune bio'}"
-- Followers: ${userInfo.followerCount?.toLocaleString()}
-- Following: ${userInfo.followingCount?.toLocaleString()}
-- Total likes: ${userInfo.heartCount?.toLocaleString()}
-- Nombre de vidéos: ${userInfo.videoCount}
+    const totalEngagement = videosData.reduce((sum, v) => sum + v.likes + v.commentaires + v.partages, 0);
+    const totalViews = videosData.reduce((sum, v) => sum + v.vues, 0);
+    const engagementRate = totalViews > 0 ? ((totalEngagement / totalViews) * 100).toFixed(1) : 0;
 
-**Dernières vidéos (${videosData.length}):**
-${videosData.map((v, i) => `${i + 1}. "${v.titre}" - ${v.vues.toLocaleString()} vues, ${v.likes.toLocaleString()} likes`).join('\n')}
+    const topVideos = [...videosData].sort((a, b) => b.vues - a.vues).slice(0, 3);
+    const topViews = topVideos[0]?.vues || avgViews;
 
-**Format de réponse attendu (JSON strict):**
+    const prompt = `Tu es un expert TikTok qui analyse des comptes de créateurs. Voici les données du compte @${userInfo.uniqueId} :
+
+**STATISTIQUES GLOBALES :**
+- Followers : ${userInfo.followerCount?.toLocaleString()}
+- Total Likes : ${userInfo.heartCount?.toLocaleString()}
+- Vidéos : ${userInfo.videoCount}
+- Following : ${userInfo.followingCount?.toLocaleString()}
+- Engagement Rate : ${engagementRate}%
+- Vues moyennes : ${avgViews.toLocaleString()}
+- Likes moyens : ${avgLikes.toLocaleString()}
+- Bio : "${userInfo.signature || 'Aucune bio'}"
+
+**NICHE DÉTECTÉE (si identifiable) :** À déterminer depuis les vidéos
+
+**ANALYSE DES ${videosData.length} DERNIÈRES VIDÉOS :**
+${videosData.map((v, i) => `${i+1}. "${v.titre.substring(0,60)}..." : ${v.vues.toLocaleString()} vues, ${v.likes.toLocaleString()} likes (${v.vues > 0 ? ((v.likes / v.vues) * 100).toFixed(1) : 0}% engagement)`).join('\n')}
+
+**TOP 3 VIDÉOS :**
+${topVideos.map((v, i) => `${i+1}. ${v.vues.toLocaleString()} vues, ${v.likes.toLocaleString()} likes`).join('\n')}
+
+---
+
+**MISSION : Rédige une analyse ultra-personnalisée du compte au format JSON.**
+
+**Format de réponse attendu (JSON strict) :**
 {
-  "niche": "Titre court de la niche (ex: Fitness & Lifestyle, Éducation Santé, etc.)",
-  "resume": "Un paragraphe de 2-3 phrases résumant le compte, son contenu principal, son audience et sa moyenne d'engagement (40K vues).",
+  "niche": "Titre court de la niche en 2-4 mots (ex: Lifestyle & Dance, Gaming & Tech, Beauty & Fashion)",
+  "resume": "RÉSUMÉ EN 2 PARAGRAPHES SÉPARÉS PAR \\n\\n (voir instructions détaillées ci-dessous)",
   "points_forts": [
     "Point fort 1 - Description détaillée",
     "Point fort 2 - Description détaillée",
@@ -330,20 +356,79 @@ ${videosData.map((v, i) => `${i + 1}. "${v.titre}" - ${v.vues.toLocaleString()} 
   ]
 }
 
-**Instructions importantes:**
-1. Sois spécifique et basé sur les données réelles
-2. Les points forts doivent valoriser ce qui fonctionne bien
-3. Les points faibles doivent être constructifs
-4. Les recommandations doivent être actionnables
-5. Utilise un ton professionnel mais encourageant
-6. RETOURNE UNIQUEMENT LE JSON, rien d'autre`;
+---
+
+**📝 INSTRUCTIONS POUR LE "resume" (TRÈS IMPORTANT) :**
+
+Le "resume" doit contenir **EXACTEMENT 2 PARAGRAPHES** séparés par \\n\\n (double saut de ligne).
+
+**PARAGRAPHE 1 - LES FORCES (120-150 mots) :**
+
+Commence par une accroche percutante avec le prénom du créateur (extraire depuis nickname si possible, sinon utilise le username) :
+- Ex: "${userInfo.nickname?.split(' ')[0] || userInfo.uniqueId}, tu es une machine à viralité avec ${(userInfo.followerCount/1000000).toFixed(1)}M de followers et ${(userInfo.heartCount/1000000).toFixed(0)}M de likes."
+
+Enchaîne avec une analyse data-driven de ses métriques d'influence :
+- Qualifie son statut : mega-influenceur (>10M), macro-influenceur (1-10M), créateur émergent (100K-1M), talent en devenir (<100K)
+- Cite son engagement rate avec contexte : "engagement ${engagementRate >= 8 ? 'exceptionnel' : engagementRate >= 5 ? 'solide' : engagementRate >= 3 ? 'correct' : 'à améliorer'} à ${engagementRate}%"
+- Identifie ses patterns de succès : formats, durées, types de contenu, collaborations détectées dans les titres
+- Mentionne les codes TikTok maîtrisés : hooks, storytelling, trends, rythme
+- Si bio multilingue ou titres multilingues : parle de portée internationale
+- Parle d'audience fidèle si engagement élevé
+
+Ton : admiratif mais factuel, avec des chiffres précis et des comparaisons percutantes.
+
+**PARAGRAPHE 2 - LES AXES D'AMÉLIORATION (100-130 mots) :**
+
+Commence par "Cependant" ou "Toutefois" pour marquer la transition.
+
+Identifie les patterns d'inconsistance :
+- Écarts de performance entre vidéos : "certaines vidéos ${topViews < avgViews * 5 ? 'stagnent' : 'explosent'} à ${Math.round(topViews/1000000)}M alors que d'autres ${avgViews < 1000000 ? 'peinent à dépasser ' + Math.round(avgViews/1000) + 'K' : 'tournent autour de ' + Math.round(avgViews/1000000) + 'M'}"
+- Compare top performers vs moyenne : "l'écart révèle des patterns non optimisés"
+
+Pointe 3-4 leviers d'optimisation concrets :
+- "Tes hooks manquent de système reproductible" (si variance importante dans les vues)
+- "L'absence de hashtags stratégiques limite ta découvrabilité algorithmique" (si peu de hashtags détectés)
+- "Ton storytelling pourrait être plus structuré pour garantir la rétention" (si engagement faible)
+- "Teste des formats plus courts/longs selon tes top performers" (si durées variées)
+
+Termine sur une vision motivante :
+- "Tu as le talent mais pas encore la machine de guerre éditoriale pour garantir ${Math.round(topViews/1000000)}M+ sur chaque post."
+
+Ton : coach constructif et actionnable, qui pousse à l'amélioration sans démotiver.
+
+---
+
+**STYLE GÉNÉRAL DU RÉSUMÉ :**
+- Tutoiement direct ("tu", "tes", "ton")
+- Vocabulaire TikTok natif (viralité, hooks, découvrabilité algorithmique, rétention, formats)
+- Chiffres précis et arrondis intelligemment (18.3M, pas 18,342,567)
+- Comparaisons percutantes ("X fois plus", "écart de 10x entre top et flop")
+- Ton expert/coach, ni trop flatteur ni trop critique
+- **PAS DE BULLET POINTS**, uniquement 2 paragraphes fluides en prose
+
+**INTERDICTIONS ABSOLUES POUR LE RÉSUMÉ :**
+- Ne commence JAMAIS par "Voici le résumé..." ou "Analyse du compte..."
+- N'utilise JAMAIS de sections avec titres (pas de "Forces:", "Faiblesses:")
+- N'utilise JAMAIS de listes à puces ou tirets dans le resume
+- Commence DIRECTEMENT par le prénom/username et l'accroche
+- Les 2 paragraphes doivent être séparés par EXACTEMENT \\n\\n
+
+---
+
+**INSTRUCTIONS POUR LES AUTRES CHAMPS :**
+
+**points_forts :** Basé sur les vraies données, valorise ce qui fonctionne (engagement, formats, collaborations)
+**points_faibles :** Constructifs et basés sur les données (variance, optimisation possible)
+**recommandations :** Actionnables et spécifiques (horaires, formats, hashtags, storytelling)
+
+RETOURNE UNIQUEMENT LE JSON, rien d'autre.`;
 
     const completion = await openai.chat.completions.create({
       model: 'gpt-4o-mini',
       messages: [
         {
           role: 'system',
-          content: 'Tu es un expert en analyse de comptes TikTok. Tu fournis toujours des réponses au format JSON valide.'
+          content: 'Tu es un expert en analyse de comptes TikTok. Tu fournis toujours des réponses au format JSON valide avec un résumé en 2 paragraphes séparés par \\n\\n.'
         },
         {
           role: 'user',
