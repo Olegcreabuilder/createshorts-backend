@@ -4,6 +4,8 @@ import { createClient } from '@supabase/supabase-js';
 import OpenAI from 'openai';
 import axios from 'axios';
 import dotenv from 'dotenv';
+import { Resend } from 'resend';
+import cron from 'node-cron';
 
 dotenv.config();
 
@@ -25,6 +27,299 @@ const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY // ⚠️ Service Role Key côté serveur
 );
+
+const resend = new Resend(process.env.RESEND_API_KEY);
+
+// Template HTML de l'email promo
+const getPromoEmailHTML = (firstName) => `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; background-color: #f9fafb;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background-color: #f9fafb; padding: 40px 20px;">
+    <tr>
+      <td align="center">
+        <table width="600" cellpadding="0" cellspacing="0" style="background-color: #ffffff; border-radius: 12px; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.05);">
+          <tr>
+            <td align="center" style="padding: 40px 40px 20px 40px;">
+              <img src="https://app.createshorts.io/createshorts-black.png" alt="CreateShorts" style="height: 32px; width: auto;">
+            </td>
+          </tr>
+          <tr>
+            <td style="padding: 20px 40px 40px 40px;">
+              <p style="font-size: 16px; color: #374151; line-height: 1.6; margin: 0 0 20px 0;">
+                ${firstName ? `Salut ${firstName},` : 'Salut,'}
+              </p>
+              <p style="font-size: 16px; color: #374151; line-height: 1.6; margin: 0 0 20px 0;">
+                Actuellement, tu es sur l'essai gratuit de <a href="https://app.createshorts.io" style="color: #7c3aed; text-decoration: none; font-weight: 600;">CreateShorts</a>.
+              </p>
+              <p style="font-size: 16px; color: #374151; line-height: 1.6; margin: 0 0 20px 0;">
+                Malheureusement, celui-ci n'est pas éternel.
+              </p>
+              <p style="font-size: 16px; color: #374151; line-height: 1.6; margin: 0 0 20px 0;">
+                Pour que tu puisses continuer à progresser vers la viralité, nous avons pensé à toi.
+              </p>
+              <p style="font-size: 16px; color: #374151; line-height: 1.6; margin: 0 0 10px 0;">
+                Bénéficie dès aujourd'hui de <strong style="color: #059669;">-99% sur ton 1er mois d'abonnement</strong> avec le code suivant :
+              </p>
+              <div style="text-align: center; margin: 30px 0;">
+                <span style="font-size: 28px; font-weight: 800; color: #111827; letter-spacing: 2px;">
+                  CREATESHORTS1
+                </span>
+              </div>
+              <p style="font-size: 15px; color: #6b7280; line-height: 1.6; margin: 0 0 20px 0; font-style: italic;">
+                C'est un code que je t'ai fait spécialement, ne le partage à personne d'autre.
+              </p>
+              <p style="font-size: 16px; color: #374151; line-height: 1.6; margin: 0 0 30px 0;">
+                Profites-en dès maintenant :
+              </p>
+              <div style="text-align: center; margin: 30px 0;">
+                <a href="https://app.createshorts.io/upgrade" 
+                   style="display: inline-block; background: linear-gradient(135deg, #7c3aed 0%, #ec4899 100%); color: #ffffff; text-decoration: none; font-weight: 700; font-size: 16px; padding: 16px 40px; border-radius: 8px; box-shadow: 0 4px 14px rgba(124, 58, 237, 0.4);">
+                  J'UTILISE LE CODE
+                </a>
+              </div>
+              <div style="background-color: #f3f4f6; border-radius: 8px; padding: 20px; margin-top: 30px;">
+                <p style="font-size: 14px; font-weight: 600; color: #374151; margin: 0 0 15px 0;">
+                  ✨ Ce que tu débloques avec le Plan Pro :
+                </p>
+                <ul style="margin: 0; padding-left: 20px; color: #6b7280; font-size: 14px; line-height: 1.8;">
+                  <li>Analyse complète de ton compte TikTok</li>
+                  <li>Idées de contenu viral illimitées</li>
+                  <li>Analyse de tes vidéos par l'IA</li>
+                  <li>Plan d'action personnalisé</li>
+                  <li>Suivi de tes performances</li>
+                </ul>
+              </div>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding: 30px 40px; border-top: 1px solid #e5e7eb; text-align: center;">
+              <p style="font-size: 13px; color: #9ca3af; margin: 0 0 10px 0;">
+                Tu reçois cet email car tu t'es inscrit sur CreateShorts.
+              </p>
+              <p style="font-size: 13px; color: #9ca3af; margin: 0;">
+                © 2025 CreateShorts. Tous droits réservés.
+              </p>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>
+`;
+
+// Fonction pour envoyer un email promo
+async function sendPromoEmail(to, firstName) {
+  try {
+    const { data, error } = await resend.emails.send({
+      from: 'CreateShorts <noreply@createshorts.io>',
+      to: to,
+      subject: 'Ton essai CreateShorts va prendre fin',
+      html: getPromoEmailHTML(firstName),
+    });
+
+    if (error) {
+      console.error('❌ Erreur envoi email:', error);
+      return { success: false, error };
+    }
+
+    console.log('✅ Email promo envoyé à:', to);
+    return { success: true, id: data.id };
+  } catch (error) {
+    console.error('❌ Exception envoi email:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+// ============================================
+// CRON JOB : Emails automatiques 1h après inscription
+// Tourne toutes les 15 minutes
+// ============================================
+cron.schedule('*/15 * * * *', async () => {
+  console.log('⏰ [CRON] Vérification des emails à envoyer...');
+
+  try {
+    // Chercher les users "free" inscrits il y a environ 1h (entre 55min et 75min)
+    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000); // 1h
+    const buffer = new Date(Date.now() - 75 * 60 * 1000); // 1h15
+
+    const { data: users, error } = await supabase
+      .from('profiles')
+      .select('id, email, first_name, created_at, promo_email_sent')
+      .eq('role', 'free')
+      .is('promo_email_sent', null)
+      .gte('created_at', buffer.toISOString())
+      .lte('created_at', oneHourAgo.toISOString());
+
+    if (error) {
+      console.error('❌ [CRON] Erreur requête:', error);
+      return;
+    }
+
+    if (!users || users.length === 0) {
+      console.log('📭 [CRON] Aucun email à envoyer');
+      return;
+    }
+
+    console.log(`📧 [CRON] ${users.length} email(s) à envoyer`);
+
+    for (const user of users) {
+      // Envoyer l'email
+      const result = await sendPromoEmail(user.email, user.first_name);
+
+      if (result.success) {
+        // Marquer comme envoyé
+        await supabase
+          .from('profiles')
+          .update({ promo_email_sent: new Date().toISOString() })
+          .eq('id', user.id);
+
+        console.log(`✅ [CRON] Email envoyé à ${user.email}`);
+      } else {
+        console.error(`❌ [CRON] Échec pour ${user.email}`);
+      }
+
+      // Attendre 1 seconde entre chaque email (éviter rate limit)
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+
+    console.log('✅ [CRON] Terminé');
+
+  } catch (error) {
+    console.error('❌ [CRON] Exception:', error);
+  }
+});
+
+console.log('✅ Cron job emails automatiques activé (toutes les 15 minutes)');
+
+
+// 3. AJOUTER CETTE ROUTE POUR RELANCER TOUTE LA BASE
+// --------------------------------------------------
+
+// ============================================
+// ROUTE : POST /api/send-bulk-promo-emails
+// Envoie l'email promo à tous les users "free" qui ne l'ont pas reçu
+// ⚠️ PROTÉGÉE PAR CLÉ ADMIN
+// ============================================
+app.post('/api/send-bulk-promo-emails', async (req, res) => {
+  try {
+    const { adminKey } = req.body;
+
+    // Vérification clé admin
+    if (adminKey !== process.env.ADMIN_SECRET_KEY) {
+      return res.status(401).json({ error: 'Non autorisé' });
+    }
+
+    console.log('🚀 [BULK] Démarrage envoi emails en masse...');
+
+    // Récupérer tous les users "free" qui n'ont pas reçu l'email
+    const { data: users, error } = await supabase
+      .from('profiles')
+      .select('id, email, first_name')
+      .eq('role', 'free')
+      .is('promo_email_sent', null);
+
+    if (error) {
+      console.error('❌ [BULK] Erreur requête:', error);
+      return res.status(500).json({ error: error.message });
+    }
+
+    if (!users || users.length === 0) {
+      return res.json({ message: 'Aucun utilisateur à contacter', sent: 0 });
+    }
+
+    console.log(`📧 [BULK] ${users.length} utilisateur(s) à contacter`);
+
+    let sent = 0;
+    let failed = 0;
+    const results = [];
+
+    for (const user of users) {
+      const result = await sendPromoEmail(user.email, user.first_name);
+
+      if (result.success) {
+        // Marquer comme envoyé
+        await supabase
+          .from('profiles')
+          .update({ promo_email_sent: new Date().toISOString() })
+          .eq('id', user.id);
+
+        sent++;
+        results.push({ email: user.email, status: 'sent' });
+      } else {
+        failed++;
+        results.push({ email: user.email, status: 'failed', error: result.error });
+      }
+
+      // Attendre 1 seconde entre chaque email
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+
+    console.log(`✅ [BULK] Terminé - Envoyés: ${sent}, Échoués: ${failed}`);
+
+    res.json({
+      message: 'Envoi terminé',
+      total: users.length,
+      sent,
+      failed,
+      results
+    });
+
+  } catch (error) {
+    console.error('❌ [BULK] Exception:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+
+// ============================================
+// ROUTE : POST /api/test-promo-email
+// Envoie un email de test
+// ============================================
+app.post('/api/test-promo-email', async (req, res) => {
+  try {
+    const { email, firstName, adminKey } = req.body;
+
+    // Vérification clé admin
+    if (adminKey !== process.env.ADMIN_SECRET_KEY) {
+      return res.status(401).json({ error: 'Non autorisé' });
+    }
+
+    if (!email) {
+      return res.status(400).json({ error: 'Email requis' });
+    }
+
+    console.log('🧪 [TEST] Envoi email de test à:', email);
+
+    const result = await sendPromoEmail(email, firstName || 'Testeur');
+
+    if (result.success) {
+      res.json({ success: true, message: 'Email de test envoyé', id: result.id });
+    } else {
+      res.status(500).json({ success: false, error: result.error });
+    }
+
+  } catch (error) {
+    console.error('❌ [TEST] Exception:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/preview-promo-email', (req, res) => {
+  const firstName = req.query.name || 'Testeur';
+  res.send(getPromoEmailHTML(firstName));
+});
+
+
+
+
+
 
 // Initialisation OpenAI
 const openai = new OpenAI({
@@ -196,30 +491,28 @@ app.post('/api/connect-tiktok', async (req, res) => {
   }
 });
 
-// Fonction pour récupérer les infos du compte via API TikWM (gratuite et fiable)
+// ============================================
+// FONCTIONS TIKTOK AVEC FALLBACK RAPIDAPI
+// ============================================
+
+// Fonction pour récupérer les infos du compte via API TikWM (gratuite) avec fallback RapidAPI
 async function fetchTikTokUserInfo(username) {
+  // 1. ESSAYER TIKWM D'ABORD (gratuit)
   try {
     console.log('🔧 Tentative avec API TikWM (gratuite)...');
     console.log('📝 Username:', username);
     
-    // API TikWM gratuite
     const url = `https://www.tikwm.com/api/user/info?unique_id=${username}`;
     
     console.log('📡 Envoi requête à TikWM...');
-    const response = await axios.get(url);
+    const response = await axios.get(url, { timeout: 10000 });
     
     console.log('✅ Réponse reçue, status:', response.status);
-    console.log('📦 Data:', JSON.stringify(response.data).substring(0, 300));
     
     if (response.data && response.data.data && response.data.data.user) {
       const userData = response.data.data;
-      console.log('✅ Utilisateur trouvé:', userData.user.nickname);
-      console.log('🖼️ Avatar brut:', userData.user.avatar);
-      console.log('🔍 User keys:', Object.keys(userData.user));
-      console.log('📊 Structure complète des stats:', JSON.stringify(userData.stats, null, 2));
-      console.log('🔍 Keys des stats:', Object.keys(userData.stats || {}));
+      console.log('✅ TikWM - Utilisateur trouvé:', userData.user.nickname);
       
-      // Adapter le format TikWM au format attendu
       return {
         id: userData.user.id,
         uniqueId: userData.user.unique_id || username,
@@ -235,47 +528,142 @@ async function fetchTikTokUserInfo(username) {
       };
     }
     
-    console.log('❌ Pas de données utilisateur dans la réponse');
-    return null;
-  } catch (error) {
-    console.error('❌ Erreur TikWM:', error.message);
-    if (error.response) {
-      console.error('📋 Status:', error.response.status);
-      console.error('📋 Data:', error.response.data);
-    }
-    throw new Error('Impossible de récupérer les infos du compte');
+    console.log('❌ TikWM - Pas de données utilisateur, tentative RapidAPI...');
+    throw new Error('Pas de données TikWM');
+    
+  } catch (tikwmError) {
+    console.error('❌ Erreur TikWM:', tikwmError.message);
+    console.log('🔄 Fallback vers RapidAPI...');
+    
+    // 2. FALLBACK RAPIDAPI
+    return await fetchTikTokUserInfoRapidAPI(username);
   }
 }
 
-// Fonction pour récupérer les vidéos d'un utilisateur via TikWM
-async function fetchTikTokUserVideos(username, maxVideos = 10) {
+// Fonction RapidAPI pour récupérer les infos utilisateur
+async function fetchTikTokUserInfoRapidAPI(username) {
   try {
-    const url = `https://www.tikwm.com/api/user/posts?unique_id=${username}&count=${maxVideos}`;
+    console.log('🔧 Tentative avec RapidAPI...');
     
-    console.log('📡 URL appelée:', url);
-    console.log('🔍 Username:', username);
-    console.log('🔢 Max vidéos demandées:', maxVideos);
+    const options = {
+      method: 'GET',
+      url: 'https://tiktok-scraper7.p.rapidapi.com/user/info',
+      params: { unique_id: username },
+      headers: {
+        'x-rapidapi-key': process.env.RAPIDAPI_KEY,
+        'x-rapidapi-host': 'tiktok-scraper7.p.rapidapi.com'
+      },
+      timeout: 15000
+    };
+
+    const response = await axios.request(options);
     
-    const response = await axios.get(url);
+    console.log('✅ RapidAPI - Réponse reçue');
     
-    console.log('📥 Statut réponse:', response.status);
-    console.log('📦 Structure réponse:', JSON.stringify(response.data).substring(0, 500));
-    
-    if (response.data && response.data.data && response.data.data.videos) {
-      console.log('✅ Vidéos trouvées:', response.data.data.videos.length);
-      console.log('🎬 Structure première vidéo:', JSON.stringify(response.data.data.videos[0], null, 2));
-      return response.data.data.videos;
+    if (response.data && response.data.data && response.data.data.user) {
+      const userData = response.data.data;
+      console.log('✅ RapidAPI - Utilisateur trouvé:', userData.user.nickname);
+      
+      return {
+        id: userData.user.id,
+        uniqueId: userData.user.uniqueId || username,
+        nickname: userData.user.nickname,
+        avatarLarger: userData.user.avatarLarger || userData.user.avatarMedium,
+        avatarMedium: userData.user.avatarMedium,
+        signature: userData.user.signature,
+        followerCount: userData.stats?.followerCount || 0,
+        followingCount: userData.stats?.followingCount || 0,
+        heartCount: userData.stats?.heartCount || userData.stats?.heart || 0,
+        videoCount: userData.stats?.videoCount || 0,
+        verified: userData.user.verified || false
+      };
     }
     
-    console.log('⚠️ Pas de vidéos dans response.data.data.videos');
-    console.log('📋 Keys disponibles dans data:', Object.keys(response.data.data || {}));
+    console.log('❌ RapidAPI - Pas de données utilisateur');
+    return null;
     
-    return [];
   } catch (error) {
-    console.error('❌ Erreur TikWM user videos:', error.message);
+    console.error('❌ Erreur RapidAPI:', error.message);
     if (error.response) {
       console.error('📋 Status:', error.response.status);
       console.error('📋 Data:', JSON.stringify(error.response.data).substring(0, 300));
+    }
+    throw new Error('Impossible de récupérer les infos du compte (TikWM et RapidAPI ont échoué)');
+  }
+}
+
+// Fonction pour récupérer les vidéos d'un utilisateur via TikWM avec fallback RapidAPI
+async function fetchTikTokUserVideos(username, maxVideos = 10) {
+  // 1. ESSAYER TIKWM D'ABORD (gratuit)
+  try {
+    const url = `https://www.tikwm.com/api/user/posts?unique_id=${username}&count=${maxVideos}`;
+    
+    console.log('📡 TikWM - Récupération des vidéos...');
+    const response = await axios.get(url, { timeout: 10000 });
+    
+    if (response.data && response.data.data && response.data.data.videos) {
+      console.log('✅ TikWM - Vidéos trouvées:', response.data.data.videos.length);
+      return response.data.data.videos;
+    }
+    
+    console.log('⚠️ TikWM - Pas de vidéos, tentative RapidAPI...');
+    throw new Error('Pas de vidéos TikWM');
+    
+  } catch (tikwmError) {
+    console.error('❌ Erreur TikWM vidéos:', tikwmError.message);
+    console.log('🔄 Fallback vers RapidAPI pour les vidéos...');
+    
+    // 2. FALLBACK RAPIDAPI
+    return await fetchTikTokUserVideosRapidAPI(username, maxVideos);
+  }
+}
+
+// Fonction RapidAPI pour récupérer les vidéos utilisateur
+async function fetchTikTokUserVideosRapidAPI(username, maxVideos = 10) {
+  try {
+    console.log('🔧 RapidAPI - Récupération des vidéos...');
+    
+    const options = {
+      method: 'GET',
+      url: 'https://tiktok-scraper7.p.rapidapi.com/user/posts',
+      params: { 
+        unique_id: username,
+        count: maxVideos.toString()
+      },
+      headers: {
+        'x-rapidapi-key': process.env.RAPIDAPI_KEY,
+        'x-rapidapi-host': 'tiktok-scraper7.p.rapidapi.com'
+      },
+      timeout: 15000
+    };
+
+    const response = await axios.request(options);
+    
+    if (response.data && response.data.data && response.data.data.videos) {
+      const videos = response.data.data.videos;
+      console.log('✅ RapidAPI - Vidéos trouvées:', videos.length);
+      
+      // Adapter le format RapidAPI au format attendu (similaire à TikWM)
+      return videos.map(v => ({
+        video_id: v.video_id || v.id,
+        title: v.title || v.desc || '',
+        cover: v.cover || v.origin_cover,
+        duration: v.duration,
+        play_count: v.play_count || v.playCount || 0,
+        digg_count: v.digg_count || v.diggCount || 0,
+        comment_count: v.comment_count || v.commentCount || 0,
+        share_count: v.share_count || v.shareCount || 0,
+        create_time: v.create_time || v.createTime
+      }));
+    }
+    
+    console.log('⚠️ RapidAPI - Pas de vidéos trouvées');
+    return [];
+    
+  } catch (error) {
+    console.error('❌ Erreur RapidAPI vidéos:', error.message);
+    if (error.response) {
+      console.error('📋 Status:', error.response.status);
     }
     return [];
   }
@@ -653,7 +1041,7 @@ app.get('/api/user-videos', async (req, res) => {
     console.log('⏱️ Attente de 1.5 seconde pour éviter le rate limit...');
     await new Promise(resolve => setTimeout(resolve, 1500));
 
-    // Récupérer les vidéos via TikWM
+    // Récupérer les vidéos via TikWM (avec fallback RapidAPI)
     const videos = await fetchTikTokUserVideos(account.tiktok_username, 10);
 
     console.log(`✅ ${videos.length} vidéos récupérées`);
@@ -896,7 +1284,7 @@ app.post('/api/tiktok-account-stats', async (req, res) => {
     console.log('⏱️ Attente de 1.5 seconde pour éviter le rate limit...');
     await new Promise(resolve => setTimeout(resolve, 1500));
 
-    // 1. Récupérer les infos du compte
+    // 1. Récupérer les infos du compte (avec fallback RapidAPI)
     const userInfo = await fetchTikTokUserInfo(cleanUsername);
 
     if (!userInfo) {
@@ -905,7 +1293,7 @@ app.post('/api/tiktok-account-stats', async (req, res) => {
 
     console.log(`✅ Compte trouvé: ${userInfo.followerCount} followers`);
 
-    // 2. Récupérer les 10 dernières vidéos
+    // 2. Récupérer les 10 dernières vidéos (avec fallback RapidAPI)
     const videos = await fetchTikTokUserVideos(cleanUsername, 10);
 
     if (videos.length === 0) {
@@ -1174,7 +1562,7 @@ app.post('/api/analyze-tracked-account', async (req, res) => {
 
     console.log(`📊 Analyse du compte tracké: @${cleanUsername}`);
 
-    // 1. Récupérer les infos du compte
+    // 1. Récupérer les infos du compte (avec fallback RapidAPI)
     const userInfo = await fetchTikTokUserInfo(cleanUsername);
 
     if (!userInfo) {
@@ -1183,7 +1571,7 @@ app.post('/api/analyze-tracked-account', async (req, res) => {
 
     console.log(`✅ Compte trouvé: ${userInfo.followerCount} followers`);
 
-    // 2. Récupérer les vidéos
+    // 2. Récupérer les vidéos (avec fallback RapidAPI)
     const videos = await fetchTikTokUserVideos(cleanUsername, 10);
 
     console.log(`📹 ${videos.length} vidéos récupérées`);
