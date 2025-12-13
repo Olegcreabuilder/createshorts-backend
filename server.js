@@ -142,6 +142,7 @@ if (!email) {
         .from('profiles')
         .update({
           role: 'pro',
+          plan: 'Pro',  
           subscription_status: 'active',
           billing_type: billingType,
           whop_membership_id: membershipId,
