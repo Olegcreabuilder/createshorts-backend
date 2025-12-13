@@ -39,145 +39,155 @@ const PORT = process.env.PORT || 3001;
 // ============================================
 app.post('/api/webhooks/whop', express.raw({ type: 'application/json' }), async (req, res) => {
   try {
-    const signature = req.headers['x-whop-signature'] || req.headers['whop-signature'];
     const payload = req.body.toString();
-    
     const event = JSON.parse(payload);
     
-    console.log('📩 [WHOP] Webhook reçu:', event.action || event.event || 'unknown');
+    // Récupérer le type d'événement depuis le header ou détecter par les données
+    const eventType = req.headers['x-whop-event-type'] || 
+                      req.headers['whop-event-type'] ||
+                      detectEventType(event.data);
+    
+    console.log('📩 [WHOP] Webhook reçu:', eventType);
     console.log('📦 [WHOP] Data:', JSON.stringify(event).substring(0, 500));
 
-    const action = event.action || event.event;
-
-    // Initialiser Supabase ici car on est avant le middleware
+    // Initialiser Supabase
     const supabaseWebhook = createClient(
       process.env.SUPABASE_URL,
       process.env.SUPABASE_SERVICE_ROLE_KEY
     );
 
-    switch (action) {
-      // ✅ Nouvel abonnement activé
-      case 'membership_activated':
-      case 'membership.went_valid': {
-        const membership = event.data || event;
-        const email = membership.user?.email || membership.email;
-        const planId = membership.plan?.id || membership.plan_id;
-        
-        console.log(`✅ [WHOP] Nouveau membre: ${email}, Plan: ${planId}`);
+    const data = event.data;
 
-        if (!email) {
-          console.error('❌ [WHOP] Email non trouvé dans le webhook');
-          return res.status(200).json({ received: true });
+    // Détecter le type d'événement par le contenu
+    if (data?.id?.startsWith('mem_') && data?.status === 'active') {
+      // ✅ MEMBERSHIP ACTIVÉ
+      console.log('✅ [WHOP] Membership activé détecté');
+      
+      const userId = data.user?.id;
+      const username = data.user?.username;
+      const membershipId = data.id;
+      const planId = data.plan?.id;
+      
+      console.log(`👤 [WHOP] User: ${username} (${userId}), Membership: ${membershipId}`);
+
+      // Récupérer l'email via l'API Whop
+      let email = null;
+      
+      if (userId && process.env.WHOP_API_KEY) {
+        try {
+          const whopResponse = await axios.get(`https://api.whop.com/api/v5/users/${userId}`, {
+            headers: {
+              'Authorization': `Bearer ${process.env.WHOP_API_KEY}`
+            }
+          });
+          email = whopResponse.data?.email;
+          console.log(`📧 [WHOP] Email récupéré via API: ${email}`);
+        } catch (apiError) {
+          console.error('⚠️ [WHOP] Erreur API Whop:', apiError.message);
         }
+      }
 
-        // Trouver l'utilisateur par email
-        let profile = null;
-        
-        const { data: profileData, error: findError } = await supabaseWebhook
+      // Si pas d'email via API, essayer de trouver par d'autres moyens
+      if (!email) {
+        // Chercher dans les métadonnées ou checkout_session
+        email = data.email || data.user?.email || data.checkout_session?.email;
+      }
+
+      if (!email) {
+        console.error('❌ [WHOP] Email non trouvé pour:', username);
+        // Essayer de matcher par le nom d'utilisateur Whop stocké précédemment
+        const { data: profileByWhopId } = await supabaseWebhook
           .from('profiles')
           .select('id, email')
-          .eq('email', email)
+          .eq('whop_user_id', userId)
           .single();
-
-        if (findError || !profileData) {
-          // Essayer avec ilike pour ignorer la casse
-          const { data: profileAlt } = await supabaseWebhook
-            .from('profiles')
-            .select('id, email')
-            .ilike('email', email)
-            .single();
-          
-          if (!profileAlt) {
-            console.error('❌ [WHOP] Utilisateur non trouvé:', email);
-            return res.status(200).json({ received: true });
-          }
-          profile = profileAlt;
-        } else {
-          profile = profileData;
+        
+        if (profileByWhopId) {
+          email = profileByWhopId.email;
+          console.log(`📧 [WHOP] Email trouvé via whop_user_id: ${email}`);
         }
+      }
 
-        // Déterminer le type d'abonnement
-        let billingType = 'monthly';
-        if (planId === 'plan_5kjPsMjNEMiSO') {
-          billingType = 'annual';
-        }
+      if (!email) {
+        console.error('❌ [WHOP] Impossible de trouver l\'email de l\'utilisateur');
+        return res.status(200).json({ received: true, error: 'Email not found' });
+      }
 
-        // Mettre à jour le profil → PRO
-        const { error: updateError } = await supabaseWebhook
+      // Trouver l'utilisateur par email
+      const { data: profile, error: findError } = await supabaseWebhook
+        .from('profiles')
+        .select('id, email')
+        .ilike('email', email)
+        .single();
+
+      if (findError || !profile) {
+        console.error('❌ [WHOP] Utilisateur non trouvé:', email);
+        return res.status(200).json({ received: true, error: 'User not found' });
+      }
+
+      // Déterminer le type d'abonnement
+      let billingType = 'monthly';
+      if (planId === 'plan_5kjPsMjNEMiSO') {
+        billingType = 'annual';
+      }
+
+      // Mettre à jour le profil → PRO
+      const { error: updateError } = await supabaseWebhook
+        .from('profiles')
+        .update({
+          role: 'pro',
+          subscription_status: 'active',
+          billing_type: billingType,
+          whop_membership_id: membershipId,
+          whop_user_id: userId,
+          subscription_start: new Date().toISOString(),
+          credits_video: 150,
+          credits_ideas: 150
+        })
+        .eq('id', profile.id);
+
+      if (updateError) {
+        console.error('❌ [WHOP] Erreur update:', updateError);
+      } else {
+        console.log(`✅ [WHOP] Utilisateur ${email} upgradé en PRO (${billingType})`);
+      }
+    }
+    
+    else if (data?.id?.startsWith('mem_') && (data?.status === 'cancelled' || data?.status === 'inactive')) {
+      // ❌ MEMBERSHIP ANNULÉ
+      console.log('⚠️ [WHOP] Membership annulé/inactif détecté');
+      
+      const membershipId = data.id;
+      
+      // Trouver l'utilisateur par membership_id
+      const { data: profile } = await supabaseWebhook
+        .from('profiles')
+        .select('id, email')
+        .eq('whop_membership_id', membershipId)
+        .single();
+
+      if (profile) {
+        await supabaseWebhook
           .from('profiles')
           .update({
-            role: 'pro',
-            subscription_status: 'active',
-            billing_type: billingType,
-            whop_membership_id: membership.id || membership.membership_id,
-            subscription_start: new Date().toISOString(),
-            credits_video: 150,
-            credits_ideas: 150
+            role: 'free',
+            subscription_status: 'cancelled',
+            credits_video: 3,
+            credits_ideas: 3
           })
           .eq('id', profile.id);
 
-        if (updateError) {
-          console.error('❌ [WHOP] Erreur update:', updateError);
-        } else {
-          console.log(`✅ [WHOP] Utilisateur ${email} upgradé en PRO (${billingType})`);
-        }
-        break;
+        console.log(`✅ [WHOP] Utilisateur ${profile.email} repassé en FREE`);
       }
-
-      // ❌ Abonnement désactivé / annulé
-      case 'membership_deactivated':
-      case 'membership.went_invalid':
-      case 'membership.cancelled': {
-        const membership = event.data || event;
-        const email = membership.user?.email || membership.email;
-
-        console.log(`⚠️ [WHOP] Abonnement terminé: ${email}`);
-
-        if (!email) {
-          return res.status(200).json({ received: true });
-        }
-
-        const { data: profile } = await supabaseWebhook
-          .from('profiles')
-          .select('id')
-          .eq('email', email)
-          .single();
-
-        if (profile) {
-          await supabaseWebhook
-            .from('profiles')
-            .update({
-              role: 'free',
-              subscription_status: 'cancelled',
-              whop_membership_id: null,
-              credits_video: 3,
-              credits_ideas: 3
-            })
-            .eq('id', profile.id);
-
-          console.log(`✅ [WHOP] Utilisateur ${email} repassé en FREE`);
-        }
-        break;
-      }
-
-      // 💳 Paiement réussi
-      case 'payment_succeeded':
-      case 'payment.succeeded': {
-        const payment = event.data || event;
-        console.log(`💳 [WHOP] Paiement réussi: ${payment.user?.email || 'unknown'}`);
-        break;
-      }
-
-      // ❌ Paiement échoué
-      case 'payment_failed':
-      case 'payment.failed': {
-        const payment = event.data || event;
-        console.log(`❌ [WHOP] Paiement échoué: ${payment.user?.email || 'unknown'}`);
-        break;
-      }
-
-      default:
-        console.log(`ℹ️ [WHOP] Event non géré: ${action}`);
+    }
+    
+    else if (data?.id?.startsWith('pay_') && data?.status === 'paid') {
+      // 💳 PAIEMENT RÉUSSI
+      console.log(`💳 [WHOP] Paiement réussi: ${data.id}`);
+    }
+    
+    else {
+      console.log(`ℹ️ [WHOP] Event non géré:`, eventType, data?.id);
     }
 
     res.status(200).json({ received: true });
@@ -187,6 +197,26 @@ app.post('/api/webhooks/whop', express.raw({ type: 'application/json' }), async 
     res.status(200).json({ received: true, error: error.message });
   }
 });
+
+// Fonction helper pour détecter le type d'événement
+function detectEventType(data) {
+  if (!data?.id) return 'unknown';
+  
+  if (data.id.startsWith('mem_')) {
+    if (data.status === 'active') return 'membership.activated';
+    if (data.status === 'cancelled') return 'membership.cancelled';
+    if (data.status === 'inactive') return 'membership.inactive';
+    return 'membership.updated';
+  }
+  
+  if (data.id.startsWith('pay_')) {
+    if (data.status === 'paid') return 'payment.succeeded';
+    if (data.status === 'failed') return 'payment.failed';
+    return 'payment.updated';
+  }
+  
+  return 'unknown';
+}
 
 console.log('✅ Whop webhooks configurés');
 
