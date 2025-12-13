@@ -2225,9 +2225,9 @@ Tu fournis des réponses JSON valides.`
     };
   }
 }
-
 // ============================================
 // ROUTE : POST /api/tiktok-account-stats (ONBOARDING)
+// REMPLACE L'ANCIENNE VERSION DANS server.js
 // ============================================
 app.post('/api/tiktok-account-stats', async (req, res) => {
   try {
@@ -2278,12 +2278,26 @@ app.post('/api/tiktok-account-stats', async (req, res) => {
     const totalShares = videos.reduce((sum, v) => sum + (v.share_count || 0), 0);
     
     const avgViews = Math.round(totalViews / videos.length);
+    const avgLikes = Math.round(totalLikes / videos.length);
     const totalEngagement = totalLikes + totalComments + totalShares;
     const engagementRate = totalViews > 0 ? ((totalEngagement / totalViews) * 100).toFixed(1) : 0;
     const followers = userInfo.followerCount || 0;
 
     const videoDescriptions = videos.map(v => v.title || '').filter(t => t).join(' ');
     
+    // Calculer le ratio vues/followers
+    const ratio = followers > 0 ? (avgViews / followers).toFixed(2) : 0;
+    
+    // Trier les vidéos pour avoir les tops
+    const topVideos = videos
+      .sort((a, b) => (b.play_count || 0) - (a.play_count || 0))
+      .slice(0, 3)
+      .map(v => ({
+        title: v.title || 'Sans titre',
+        views: v.play_count || 0,
+        likes: v.digg_count || 0
+      }));
+
     let niche = 'Contenu Général';
     try {
       const nicheCompletion = await openai.chat.completions.create({
@@ -2291,7 +2305,7 @@ app.post('/api/tiktok-account-stats', async (req, res) => {
         messages: [
           {
             role: 'system',
-            content: 'Tu es un expert en analyse de contenu TikTok. Tu dois identifier la niche principale du compte en 2-4 mots maximum en français.'
+            content: 'Tu es un expert en analyse de contenu TikTok. Tu dois identifier la niche principale du compte en 2-4 mots maximum en français. Format: "Mot & Mot" avec majuscules.'
           },
           {
             role: 'user',
@@ -2399,48 +2413,118 @@ app.post('/api/tiktok-account-stats', async (req, res) => {
     else if (vScore >= 5.5) viralityLabel = 'Potentiel moyen';
     else viralityLabel = 'Potentiel à développer';
 
-    const topVideos = videos
-      .sort((a, b) => (b.play_count || 0) - (a.play_count || 0))
-      .slice(0, 3)
-      .map(v => ({
-        title: v.title || 'Sans titre',
-        views: v.play_count || 0,
-        likes: v.digg_count || 0
-      }));
-
+    // ============================================
+    // GÉNÉRATION DES POINTS FORTS (AMÉLIORÉ)
+    // ============================================
     let strengths = [
-      'Contenu authentique et inspirant qui crée une connexion émotionnelle',
-      'Cohérence visuelle excellente avec une identité de marque forte',
-      `Taux d'engagement de ${engagementRate}% ${engRate >= 4 ? 'au-dessus' : 'proche'} de la moyenne`,
-      'Publication régulière qui fidélise l\'audience'
+      `Base d'audience de ${followers.toLocaleString()} abonnés engagés`,
+      `${userInfo.videoCount} vidéos publiées avec un historique analysable`,
+      `Taux d'engagement de ${engagementRate}% sur les dernières vidéos`,
+      'Présence établie sur la plateforme TikTok'
     ];
 
     try {
+      const topVideo = topVideos[0];
+
+      const strengthsPrompt = `Tu es un coach TikTok expert. Analyse ce compte et génère 4 points forts SPÉCIFIQUES et PERSONNALISÉS.
+
+**COMPTE : @${cleanUsername}**
+- Niche : ${niche}
+- Followers : ${followers.toLocaleString()}
+- Total Likes : ${(userInfo.heartCount || 0).toLocaleString()}
+- Vidéos publiées : ${userInfo.videoCount}
+
+**MÉTRIQUES :**
+- Engagement Rate : ${engagementRate}%
+- Vues moyennes : ${avgViews.toLocaleString()}
+- Likes moyens : ${avgLikes.toLocaleString()}
+- Ratio vues/followers : ${ratio}x
+
+**TOP VIDÉO :**
+"${topVideo?.title || 'N/A'}" → ${(topVideo?.views || 0).toLocaleString()} vues
+
+**DESCRIPTIONS DES VIDÉOS :**
+${videoDescriptions.substring(0, 600)}
+
+---
+
+**⛔ EXPRESSIONS INTERDITES (ne les utilise JAMAIS) :**
+- "connexion émotionnelle"
+- "authenticité brute"
+- "cohérence visuelle"
+- "identité de marque forte"
+- "contenu authentique et inspirant"
+- "fidélise l'audience"
+- "stratégie de contenu"
+- "ligne éditoriale"
+
+**✅ À LA PLACE, sois CONCRET et SPÉCIFIQUE :**
+- Mentionne des CHIFFRES réels du compte
+- Cite des éléments des TITRES de vidéos si pertinent
+- Adapte le vocabulaire à la NICHE "${niche}"
+- Chaque point doit être UNIQUE à ce compte
+
+---
+
+**FORMAT : 4 points forts, un par ligne, sans numérotation ni tirets.**
+
+Exemples de BONS points forts :
+- "Tes vidéos génèrent ${avgViews.toLocaleString()} vues en moyenne, soit ${ratio}x ton nombre d'abonnés"
+- "Ta meilleure vidéo '${(topVideo?.title || '').substring(0, 30)}...' prouve que ton format fonctionne"
+- "Ton taux d'engagement de ${engagementRate}% est ${parseFloat(engagementRate) >= 4 ? 'supérieur' : 'proche'} de la moyenne TikTok (3-5%)"
+
+Génère 4 points forts UNIQUES pour @${cleanUsername} :`;
+
       const strengthsCompletion = await openai.chat.completions.create({
         model: 'gpt-4o-mini',
         messages: [
           {
             role: 'system',
-            content: 'Tu es un expert en analyse de comptes TikTok. Génère 4 points forts spécifiques et détaillés en français basés sur les vraies données du compte. Chaque point doit être une phrase complète. Retourne uniquement les 4 points forts, un par ligne, sans numérotation.'
+            content: `Tu es un coach TikTok qui valorise les créateurs avec des analyses SPÉCIFIQUES.
+
+RÈGLES STRICTES :
+- Chaque point fort doit mentionner un élément CONCRET (chiffre, titre, métrique)
+- JAMAIS de phrases génériques applicables à n'importe quel compte
+- Utilise le vocabulaire de la niche du créateur
+- Ton positif et motivant mais basé sur des FAITS`
           },
           {
             role: 'user',
-            content: `Compte TikTok @${cleanUsername}. Niche: ${niche}. Stats: ${followers} abonnés, ${avgViews} vues moyennes, ${engagementRate}% engagement, ${userInfo.videoCount} vidéos. Descriptions des vidéos: ${videoDescriptions.substring(0, 500)}. Génère 4 points forts précis et valorisants basés sur ces données réelles.`
+            content: strengthsPrompt
           }
         ],
-        max_tokens: 300,
-        temperature: 0.7
+        max_tokens: 400,
+        temperature: 0.8
       });
 
       const strengthsText = strengthsCompletion.choices[0]?.message?.content?.trim();
       if (strengthsText) {
-        const parsedStrengths = strengthsText.split('\n').filter(s => s.trim().length > 10).map(s => s.replace(/^\d+\.\s*/, '').trim());
+        const parsedStrengths = strengthsText
+          .split('\n')
+          .filter(s => s.trim().length > 15)
+          .map(s => s.replace(/^[-•\d.)\s]+/, '').trim())
+          .filter(s => s.length > 0);
+        
         if (parsedStrengths.length >= 4) {
           strengths = parsedStrengths.slice(0, 4);
+        } else if (parsedStrengths.length >= 2) {
+          // Compléter avec des points par défaut basés sur les données
+          strengths = [
+            ...parsedStrengths,
+            `${avgViews.toLocaleString()} vues moyennes par vidéo`,
+            `Taux d'engagement de ${engagementRate}% sur ton contenu`
+          ].slice(0, 4);
         }
       }
     } catch (error) {
       console.error('Erreur génération points forts:', error);
+      // Fallback avec des données réelles
+      strengths = [
+        `Base de ${followers.toLocaleString()} abonnés sur TikTok`,
+        `${avgViews.toLocaleString()} vues en moyenne par vidéo`,
+        `Taux d'engagement de ${engagementRate}% sur ton contenu`,
+        `${userInfo.videoCount} vidéos publiées - contenu régulier`
+      ];
     }
 
     const analysisData = {
