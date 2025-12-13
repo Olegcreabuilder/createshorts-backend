@@ -6,15 +6,195 @@ import axios from 'axios';
 import dotenv from 'dotenv';
 import { Resend } from 'resend';
 import cron from 'node-cron';
+import crypto from 'crypto';
+import ffmpeg from 'fluent-ffmpeg';
+import ffmpegInstaller from '@ffmpeg-installer/ffmpeg';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { promisify } from 'util';
+import { pipeline } from 'stream';
+
+const streamPipeline = promisify(pipeline);
+
+// Configurer ffmpeg
+ffmpeg.setFfmpegPath(ffmpegInstaller.path);
+
+// Créer le dossier temp
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const TEMP_DIR = path.join(__dirname, 'temp');
+
+if (!fs.existsSync(TEMP_DIR)) {
+  fs.mkdirSync(TEMP_DIR, { recursive: true });
+}
 
 dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// Middleware
+// ============================================
+// WHOP WEBHOOK - DOIT ÊTRE AVANT express.json()
+// ============================================
+app.post('/api/webhooks/whop', express.raw({ type: 'application/json' }), async (req, res) => {
+  try {
+    const signature = req.headers['x-whop-signature'] || req.headers['whop-signature'];
+    const payload = req.body.toString();
+    
+    const event = JSON.parse(payload);
+    
+    console.log('📩 [WHOP] Webhook reçu:', event.action || event.event || 'unknown');
+    console.log('📦 [WHOP] Data:', JSON.stringify(event).substring(0, 500));
+
+    const action = event.action || event.event;
+
+    // Initialiser Supabase ici car on est avant le middleware
+    const supabaseWebhook = createClient(
+      process.env.SUPABASE_URL,
+      process.env.SUPABASE_SERVICE_ROLE_KEY
+    );
+
+    switch (action) {
+      // ✅ Nouvel abonnement activé
+      case 'membership_activated':
+      case 'membership.went_valid': {
+        const membership = event.data || event;
+        const email = membership.user?.email || membership.email;
+        const planId = membership.plan?.id || membership.plan_id;
+        
+        console.log(`✅ [WHOP] Nouveau membre: ${email}, Plan: ${planId}`);
+
+        if (!email) {
+          console.error('❌ [WHOP] Email non trouvé dans le webhook');
+          return res.status(200).json({ received: true });
+        }
+
+        // Trouver l'utilisateur par email
+        let profile = null;
+        
+        const { data: profileData, error: findError } = await supabaseWebhook
+          .from('profiles')
+          .select('id, email')
+          .eq('email', email)
+          .single();
+
+        if (findError || !profileData) {
+          // Essayer avec ilike pour ignorer la casse
+          const { data: profileAlt } = await supabaseWebhook
+            .from('profiles')
+            .select('id, email')
+            .ilike('email', email)
+            .single();
+          
+          if (!profileAlt) {
+            console.error('❌ [WHOP] Utilisateur non trouvé:', email);
+            return res.status(200).json({ received: true });
+          }
+          profile = profileAlt;
+        } else {
+          profile = profileData;
+        }
+
+        // Déterminer le type d'abonnement
+        let billingType = 'monthly';
+        if (planId === 'plan_5kjPsMjNEMiSO') {
+          billingType = 'annual';
+        }
+
+        // Mettre à jour le profil → PRO
+        const { error: updateError } = await supabaseWebhook
+          .from('profiles')
+          .update({
+            role: 'pro',
+            subscription_status: 'active',
+            billing_type: billingType,
+            whop_membership_id: membership.id || membership.membership_id,
+            subscription_start: new Date().toISOString(),
+            credits_video: 150,
+            credits_ideas: 150
+          })
+          .eq('id', profile.id);
+
+        if (updateError) {
+          console.error('❌ [WHOP] Erreur update:', updateError);
+        } else {
+          console.log(`✅ [WHOP] Utilisateur ${email} upgradé en PRO (${billingType})`);
+        }
+        break;
+      }
+
+      // ❌ Abonnement désactivé / annulé
+      case 'membership_deactivated':
+      case 'membership.went_invalid':
+      case 'membership.cancelled': {
+        const membership = event.data || event;
+        const email = membership.user?.email || membership.email;
+
+        console.log(`⚠️ [WHOP] Abonnement terminé: ${email}`);
+
+        if (!email) {
+          return res.status(200).json({ received: true });
+        }
+
+        const { data: profile } = await supabaseWebhook
+          .from('profiles')
+          .select('id')
+          .eq('email', email)
+          .single();
+
+        if (profile) {
+          await supabaseWebhook
+            .from('profiles')
+            .update({
+              role: 'free',
+              subscription_status: 'cancelled',
+              whop_membership_id: null,
+              credits_video: 3,
+              credits_ideas: 3
+            })
+            .eq('id', profile.id);
+
+          console.log(`✅ [WHOP] Utilisateur ${email} repassé en FREE`);
+        }
+        break;
+      }
+
+      // 💳 Paiement réussi
+      case 'payment_succeeded':
+      case 'payment.succeeded': {
+        const payment = event.data || event;
+        console.log(`💳 [WHOP] Paiement réussi: ${payment.user?.email || 'unknown'}`);
+        break;
+      }
+
+      // ❌ Paiement échoué
+      case 'payment_failed':
+      case 'payment.failed': {
+        const payment = event.data || event;
+        console.log(`❌ [WHOP] Paiement échoué: ${payment.user?.email || 'unknown'}`);
+        break;
+      }
+
+      default:
+        console.log(`ℹ️ [WHOP] Event non géré: ${action}`);
+    }
+
+    res.status(200).json({ received: true });
+
+  } catch (error) {
+    console.error('❌ [WHOP] Erreur webhook:', error);
+    res.status(200).json({ received: true, error: error.message });
+  }
+});
+
+console.log('✅ Whop webhooks configurés');
+
+// ============================================
+// MIDDLEWARE STANDARD (après le webhook Whop)
+// ============================================
 app.use(cors({
-  origin: true, // Accepte toutes les origines en développement
+  origin: true,
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
@@ -25,7 +205,7 @@ app.use(express.json());
 // Initialisation Supabase avec SERVICE_ROLE_KEY
 const supabase = createClient(
   process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY // ⚠️ Service Role Key côté serveur
+  process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
 const resend = new Resend(process.env.RESEND_API_KEY);
@@ -139,15 +319,13 @@ async function sendPromoEmail(to, firstName) {
 
 // ============================================
 // CRON JOB : Emails automatiques 1h après inscription
-// Tourne toutes les 15 minutes
 // ============================================
 cron.schedule('*/15 * * * *', async () => {
   console.log('⏰ [CRON] Vérification des emails à envoyer...');
 
   try {
-    // Chercher les users "free" inscrits il y a environ 1h (entre 55min et 75min)
-    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000); // 1h
-    const buffer = new Date(Date.now() - 75 * 60 * 1000); // 1h15
+    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
+    const buffer = new Date(Date.now() - 75 * 60 * 1000);
 
     const { data: users, error } = await supabase
       .from('profiles')
@@ -170,11 +348,9 @@ cron.schedule('*/15 * * * *', async () => {
     console.log(`📧 [CRON] ${users.length} email(s) à envoyer`);
 
     for (const user of users) {
-      // Envoyer l'email
       const result = await sendPromoEmail(user.email, user.first_name);
 
       if (result.success) {
-        // Marquer comme envoyé
         await supabase
           .from('profiles')
           .update({ promo_email_sent: new Date().toISOString() })
@@ -185,7 +361,6 @@ cron.schedule('*/15 * * * *', async () => {
         console.error(`❌ [CRON] Échec pour ${user.email}`);
       }
 
-      // Attendre 1 seconde entre chaque email (éviter rate limit)
       await new Promise(resolve => setTimeout(resolve, 1000));
     }
 
@@ -198,27 +373,19 @@ cron.schedule('*/15 * * * *', async () => {
 
 console.log('✅ Cron job emails automatiques activé (toutes les 15 minutes)');
 
-
-// 3. AJOUTER CETTE ROUTE POUR RELANCER TOUTE LA BASE
-// --------------------------------------------------
-
 // ============================================
-// ROUTE : POST /api/send-bulk-promo-emails
-// Envoie l'email promo à tous les users "free" qui ne l'ont pas reçu
-// ⚠️ PROTÉGÉE PAR CLÉ ADMIN
+// ROUTES EMAIL
 // ============================================
 app.post('/api/send-bulk-promo-emails', async (req, res) => {
   try {
     const { adminKey } = req.body;
 
-    // Vérification clé admin
     if (adminKey !== process.env.ADMIN_SECRET_KEY) {
       return res.status(401).json({ error: 'Non autorisé' });
     }
 
     console.log('🚀 [BULK] Démarrage envoi emails en masse...');
 
-    // Récupérer tous les users "free" qui n'ont pas reçu l'email
     const { data: users, error } = await supabase
       .from('profiles')
       .select('id, email, first_name')
@@ -244,7 +411,6 @@ app.post('/api/send-bulk-promo-emails', async (req, res) => {
       const result = await sendPromoEmail(user.email, user.first_name);
 
       if (result.success) {
-        // Marquer comme envoyé
         await supabase
           .from('profiles')
           .update({ promo_email_sent: new Date().toISOString() })
@@ -257,7 +423,6 @@ app.post('/api/send-bulk-promo-emails', async (req, res) => {
         results.push({ email: user.email, status: 'failed', error: result.error });
       }
 
-      // Attendre 1 seconde entre chaque email
       await new Promise(resolve => setTimeout(resolve, 1000));
     }
 
@@ -277,16 +442,10 @@ app.post('/api/send-bulk-promo-emails', async (req, res) => {
   }
 });
 
-
-// ============================================
-// ROUTE : POST /api/test-promo-email
-// Envoie un email de test
-// ============================================
 app.post('/api/test-promo-email', async (req, res) => {
   try {
     const { email, firstName, adminKey } = req.body;
 
-    // Vérification clé admin
     if (adminKey !== process.env.ADMIN_SECRET_KEY) {
       return res.status(401).json({ error: 'Non autorisé' });
     }
@@ -316,10 +475,34 @@ app.get('/api/preview-promo-email', (req, res) => {
   res.send(getPromoEmailHTML(firstName));
 });
 
+// ============================================
+// ROUTE WHOP : Vérifier le statut d'un membre
+// ============================================
+app.get('/api/whop/check-membership/:email', async (req, res) => {
+  try {
+    const { email } = req.params;
+    
+    const { data: profile } = await supabase
+      .from('profiles')
+      .select('role, subscription_status, whop_membership_id, billing_type')
+      .eq('email', email)
+      .single();
 
+    if (!profile) {
+      return res.status(404).json({ error: 'Utilisateur non trouvé' });
+    }
 
+    res.json({
+      isPro: profile.role === 'pro',
+      status: profile.subscription_status,
+      billingType: profile.billing_type,
+      membershipId: profile.whop_membership_id
+    });
 
-
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
 
 // Initialisation OpenAI
 const openai = new OpenAI({
@@ -333,13 +516,12 @@ app.post('/api/connect-tiktok', async (req, res) => {
   try {
     console.log('🎯 Début de la route /api/connect-tiktok');
     console.log('📦 Body reçu:', req.body);
-    const { username, userToken } = req.body; // userToken = JWT de Supabase
+    const { username, userToken } = req.body;
 
     if (!username) {
       return res.status(400).json({ error: 'Username requis' });
     }
 
-    // Vérifier l'authentification
     const { data: { user }, error: authError } = await supabase.auth.getUser(userToken);
     
     if (authError || !user) {
@@ -348,7 +530,6 @@ app.post('/api/connect-tiktok', async (req, res) => {
 
     console.log(`🔍 Récupération du compte TikTok: @${username}`);
 
-    // 1. Récupérer les infos du compte via RapidAPI
     const userInfo = await fetchTikTokUserInfo(username);
 
     if (!userInfo) {
@@ -357,20 +538,16 @@ app.post('/api/connect-tiktok', async (req, res) => {
 
     console.log(`✅ Compte trouvé: ${userInfo.followerCount} followers`);
 
-    // 2. Récupérer les dernières vidéos pour analyse
     const userVideos = await fetchTikTokUserVideos(username);
 
     console.log(`📹 ${userVideos.length} vidéos récupérées`);
 
-    // 3. Analyser le compte avec l'IA
     const aiAnalysis = await analyzeAccountWithAI(userInfo, userVideos);
 
     console.log('🤖 Analyse IA terminée');
 
-    // 4. Calculer les statistiques (AVEC TOUTES LES NOUVELLES STATS)
     const stats = calculateStats(userInfo, userVideos);
 
-    // ⭐ EXTRACTION DES STATS POUR LA BDD
     const { 
       viralityScore, 
       viralityLabel, 
@@ -379,7 +556,7 @@ app.post('/api/connect-tiktok', async (req, res) => {
       growthColor,
       engagementRate,
       avgViews,
-      avgLikes,        // ⭐ AJOUT avg_likes
+      avgLikes,
       ...otherStats 
     } = stats;
 
@@ -391,24 +568,9 @@ app.post('/api/connect-tiktok', async (req, res) => {
       growthColor,
       engagementRate,
       avgViews,
-      avgLikes         // ⭐ Log avg_likes
+      avgLikes
     });
 
-    console.log('💾 Données à sauvegarder:', {
-      username,
-      avatar_url: userInfo.avatarLarger || userInfo.avatarMedium,
-      followers_count: userInfo.followerCount,
-      following_count: userInfo.followingCount,
-      total_likes: userInfo.heartCount,
-      video_count: userInfo.videoCount,
-      virality_score: viralityScore,
-      growth_potential: growthPotential,
-      engagement_rate: engagementRate,
-      avg_views: avgViews,
-      avg_likes: avgLikes  // ⭐ Log avg_likes
-    });
-
-    // 5. Sauvegarder dans Supabase (AVEC LES NOUVELLES COLONNES)
     const { data: savedAccount, error: dbError } = await supabase
       .from('connected_accounts')
       .upsert({
@@ -423,8 +585,6 @@ app.post('/api/connect-tiktok', async (req, res) => {
         total_likes: userInfo.heartCount,
         video_count: userInfo.videoCount,
         verified: userInfo.verified || false,
-        
-        // ⭐ AJOUT DES NOUVELLES COLONNES
         virality_score: viralityScore,
         virality_label: viralityLabel,
         growth_potential: growthPotential,
@@ -432,14 +592,13 @@ app.post('/api/connect-tiktok', async (req, res) => {
         growth_color: growthColor,
         engagement_rate: engagementRate,
         avg_views: avgViews,
-        avg_likes: avgLikes,  // ⭐ SAUVEGARDE avg_likes
-        
+        avg_likes: avgLikes,
         niche: aiAnalysis.niche,
         account_summary: aiAnalysis.resume,
         strengths: aiAnalysis.points_forts,
         weaknesses: aiAnalysis.points_faibles,
         recommendations: aiAnalysis.recommandations,
-        stats: otherStats, // Les autres stats (avgComments, avgShares, etc.)
+        stats: otherStats,
         last_sync: new Date().toISOString(),
         is_connected: true,
       }, {
@@ -453,7 +612,6 @@ app.post('/api/connect-tiktok', async (req, res) => {
 
     console.log('💾 Compte sauvegardé en base de données');
 
-    // 6. Retourner au frontend (AVEC LES NOUVELLES STATS)
     return res.status(200).json({
       success: true,
       account: {
@@ -466,8 +624,6 @@ app.post('/api/connect-tiktok', async (req, res) => {
         videoCount: userInfo.videoCount,
         bio: userInfo.signature,
         verified: userInfo.verified,
-        
-        // ⭐ AJOUT DES NOUVELLES STATS
         viralityScore,
         viralityLabel,
         growthPotential,
@@ -475,8 +631,7 @@ app.post('/api/connect-tiktok', async (req, res) => {
         growthColor,
         engagementRate,
         avgViews,
-        avgLikes,        // ⭐ RETOUR avg_likes au frontend
-        
+        avgLikes,
         niche: aiAnalysis.niche,
         analysis: aiAnalysis,
         stats: otherStats,
@@ -495,9 +650,7 @@ app.post('/api/connect-tiktok', async (req, res) => {
 // FONCTIONS TIKTOK AVEC FALLBACK RAPIDAPI
 // ============================================
 
-// Fonction pour récupérer les infos du compte via API TikWM (gratuite) avec fallback RapidAPI
 async function fetchTikTokUserInfo(username) {
-  // 1. ESSAYER TIKWM D'ABORD (gratuit)
   try {
     console.log('🔧 Tentative avec API TikWM (gratuite)...');
     console.log('📝 Username:', username);
@@ -535,12 +688,10 @@ async function fetchTikTokUserInfo(username) {
     console.error('❌ Erreur TikWM:', tikwmError.message);
     console.log('🔄 Fallback vers RapidAPI...');
     
-    // 2. FALLBACK RAPIDAPI
     return await fetchTikTokUserInfoRapidAPI(username);
   }
 }
 
-// Fonction RapidAPI pour récupérer les infos utilisateur
 async function fetchTikTokUserInfoRapidAPI(username) {
   try {
     console.log('🔧 Tentative avec RapidAPI...');
@@ -592,9 +743,7 @@ async function fetchTikTokUserInfoRapidAPI(username) {
   }
 }
 
-// Fonction pour récupérer les vidéos d'un utilisateur via TikWM avec fallback RapidAPI
 async function fetchTikTokUserVideos(username, maxVideos = 10) {
-  // 1. ESSAYER TIKWM D'ABORD (gratuit)
   try {
     const url = `https://www.tikwm.com/api/user/posts?unique_id=${username}&count=${maxVideos}`;
     
@@ -613,12 +762,10 @@ async function fetchTikTokUserVideos(username, maxVideos = 10) {
     console.error('❌ Erreur TikWM vidéos:', tikwmError.message);
     console.log('🔄 Fallback vers RapidAPI pour les vidéos...');
     
-    // 2. FALLBACK RAPIDAPI
     return await fetchTikTokUserVideosRapidAPI(username, maxVideos);
   }
 }
 
-// Fonction RapidAPI pour récupérer les vidéos utilisateur
 async function fetchTikTokUserVideosRapidAPI(username, maxVideos = 10) {
   try {
     console.log('🔧 RapidAPI - Récupération des vidéos...');
@@ -643,7 +790,6 @@ async function fetchTikTokUserVideosRapidAPI(username, maxVideos = 10) {
       const videos = response.data.data.videos;
       console.log('✅ RapidAPI - Vidéos trouvées:', videos.length);
       
-      // Adapter le format RapidAPI au format attendu (similaire à TikWM)
       return videos.map(v => ({
         video_id: v.video_id || v.id,
         title: v.title || v.desc || '',
@@ -669,7 +815,9 @@ async function fetchTikTokUserVideosRapidAPI(username, maxVideos = 10) {
   }
 }
 
-// Fonction pour analyser le compte avec l'IA
+// ============================================
+// FONCTION ANALYSE COMPTE IA
+// ============================================
 async function analyzeAccountWithAI(userInfo, videos) {
   try {
     const videosData = videos.slice(0, 10).map(v => ({
@@ -680,7 +828,6 @@ async function analyzeAccountWithAI(userInfo, videos) {
       partages: v.share_count || 0,
     }));
 
-    // ⭐ CALCULS POUR LE PROMPT
     const avgViews = videosData.length > 0 
       ? Math.round(videosData.reduce((sum, v) => sum + v.vues, 0) / videosData.length)
       : 0;
@@ -694,173 +841,208 @@ async function analyzeAccountWithAI(userInfo, videos) {
     const engagementRate = totalViews > 0 ? ((totalEngagement / totalViews) * 100).toFixed(1) : 0;
 
     const topVideos = [...videosData].sort((a, b) => b.vues - a.vues).slice(0, 3);
+    const flopVideos = [...videosData].sort((a, b) => a.vues - b.vues).slice(0, 2);
     const topViews = topVideos[0]?.vues || avgViews;
+    const flopViews = flopVideos[0]?.vues || avgViews;
+    
+    const consistencyRatio = flopViews > 0 ? (topViews / flopViews).toFixed(1) : 'N/A';
 
-    const prompt = `Tu es un expert TikTok qui analyse des comptes de créateurs. Voici les données du compte @${userInfo.uniqueId} :
+    const prompt = `Tu es un coach TikTok expert. Analyse ce compte de manière UNIQUE et PERSONNALISÉE.
 
-**STATISTIQUES GLOBALES :**
+**COMPTE : @${userInfo.uniqueId}**
+- Nom : ${userInfo.nickname}
+- Bio : "${userInfo.signature || 'Aucune bio'}"
 - Followers : ${userInfo.followerCount?.toLocaleString()}
 - Total Likes : ${userInfo.heartCount?.toLocaleString()}
-- Vidéos : ${userInfo.videoCount}
+- Vidéos publiées : ${userInfo.videoCount}
 - Following : ${userInfo.followingCount?.toLocaleString()}
+
+**MÉTRIQUES CALCULÉES :**
 - Engagement Rate : ${engagementRate}%
 - Vues moyennes : ${avgViews.toLocaleString()}
 - Likes moyens : ${avgLikes.toLocaleString()}
-- Bio : "${userInfo.signature || 'Aucune bio'}"
+- Ratio Top/Flop : ${consistencyRatio}x (écart entre meilleure et moins bonne vidéo)
 
-**NICHE DÉTECTÉE (si identifiable) :** À déterminer depuis les vidéos
+**LES ${videosData.length} DERNIÈRES VIDÉOS :**
+${videosData.map((v, i) => `${i+1}. "${v.titre.substring(0,50)}..." → ${v.vues.toLocaleString()} vues, ${v.likes.toLocaleString()} likes`).join('\n')}
 
-**ANALYSE DES ${videosData.length} DERNIÈRES VIDÉOS :**
-${videosData.map((v, i) => `${i+1}. "${v.titre.substring(0,60)}..." : ${v.vues.toLocaleString()} vues, ${v.likes.toLocaleString()} likes (${v.vues > 0 ? ((v.likes / v.vues) * 100).toFixed(1) : 0}% engagement)`).join('\n')}
+**TOP 3 :**
+${topVideos.map((v, i) => `${i+1}. "${v.titre.substring(0,40)}..." : ${v.vues.toLocaleString()} vues`).join('\n')}
 
-**TOP 3 VIDÉOS :**
-${topVideos.map((v, i) => `${i+1}. ${v.vues.toLocaleString()} vues, ${v.likes.toLocaleString()} likes`).join('\n')}
+**FLOP 2 :**
+${flopVideos.map((v, i) => `${i+1}. "${v.titre.substring(0,40)}..." : ${v.vues.toLocaleString()} vues`).join('\n')}
 
 ---
 
-**MISSION : Rédige une analyse ultra-personnalisée du compte au format JSON.**
+**TA MISSION : Produire une analyse SPÉCIFIQUE à ce compte.**
 
-**Format de réponse attendu (JSON strict) :**
+Analyse les VRAIS patterns visibles dans les données :
+- Quels sujets/formats performent le mieux ? (regarde les titres des tops)
+- Quels sujets/formats sous-performent ? (regarde les titres des flops)
+- Y a-t-il une cohérence thématique ou c'est dispersé ?
+- L'écart top/flop (${consistencyRatio}x) révèle quoi sur la consistance ?
+
+---
+
+**⛔ EXPRESSIONS INTERDITES (ne les utilise JAMAIS) :**
+- "connexion émotionnelle"
+- "authenticité brute"  
+- "engagement de la communauté"
+- "cohérence visuelle"
+- "identité de marque forte"
+- "contenu authentique et inspirant"
+- "fidélise l'audience"
+- "stratégie de contenu"
+- "ligne éditoriale"
+- "optimisation de la bio"
+
+**✅ À LA PLACE, sois CONCRET et SPÉCIFIQUE :**
+- Mentionne des TITRES réels du compte
+- Compare les tops vs les flops avec des exemples
+- Donne des chiffres précis du compte
+- Adapte le vocabulaire à la NICHE de ce créateur
+
+---
+
+**FORMAT JSON STRICT :**
+
 {
-  "niche": "Titre court de la niche en 2-4 mots (ex: Lifestyle & Dance, Gaming & Tech, Beauty & Fashion)",
-  "resume": "RÉSUMÉ EN 2 PARAGRAPHES SÉPARÉS PAR \\n\\n (voir instructions détaillées ci-dessous)",
+  "niche": "IMPORTANT : Format 'Mot1 & Mot2' avec MAJUSCULES sur chaque mot. Exemples : 'Lifestyle & Beauté', 'Gaming & Tech', 'Analyse Films & Séries', 'Fitness & Motivation', 'Cuisine & Recettes'. Utilise & et non /.",
+  
+  "resume": "OBLIGATOIRE : 2 PARAGRAPHES DISTINCTS séparés par \\n\\n
+  
+  **PARAGRAPHE 1 - LES FORCES (120-150 mots) :**
+  Commence DIRECTEMENT par le prénom/pseudo suivi d'une accroche percutante sur ses stats.
+  Analyse ce qui FONCTIONNE en citant des exemples concrets de vidéos qui marchent.
+  Mentionne les chiffres réels (vues, engagement).
+  Identifie le format/angle qui performe le mieux.
+  Ton admiratif et valorisant.
+  
+  **PARAGRAPHE 2 - LES AXES D'AMÉLIORATION (100-130 mots) :**
+  Commence OBLIGATOIREMENT par 'Cependant' ou 'Toutefois'.
+  Analyse l'écart entre les tops et les flops (ratio ${consistencyRatio}x).
+  Identifie pourquoi certaines vidéos sous-performent en citant des exemples.
+  Donne des pistes concrètes basées sur les patterns observés.
+  Termine sur une note motivante avec un objectif.
+  Ton coach constructif.",
+  
   "points_forts": [
-    "Point fort 1 - Description détaillée",
-    "Point fort 2 - Description détaillée",
-    "Point fort 3 - Description détaillée",
-    "Point fort 4 - Description détaillée"
+    "Point fort 1 - SPÉCIFIQUE avec exemple ou chiffre du compte (ex: 'Tes vidéos GRWM performent 3x mieux que la moyenne avec X vues')",
+    "Point fort 2 - SPÉCIFIQUE basé sur les données réelles",
+    "Point fort 3 - SPÉCIFIQUE lié à un pattern identifié dans les tops",
+    "Point fort 4 - SPÉCIFIQUE avec référence à une vidéo ou un format"
   ],
+  
   "points_faibles": [
-    "Point faible 1 - Description détaillée",
-    "Point faible 2 - Description détaillée",
-    "Point faible 3 - Description détaillée",
-    "Point faible 4 - Description détaillée"
+    "Point faible 1 - CONCRET basé sur les flops analysés (ex: 'Les vidéos sans hook clair comme [titre] plafonnent à Xk vues')",
+    "Point faible 2 - CONCRET avec exemple de ce qui ne marche pas",
+    "Point faible 3 - CONCRET lié à un pattern identifié",
+    "Point faible 4 - CONCRET avec piste d'amélioration"
   ],
+  
   "recommandations": [
-    "Recommandation 1 - Action concrète et détaillée",
-    "Recommandation 2 - Action concrète et détaillée",
-    "Recommandation 3 - Action concrète et détaillée",
-    "Recommandation 4 - Action concrète et détaillée"
+    "Recommandation 1 - ACTION PRÉCISE basée sur ce qui marche (ex: 'Reproduis le format de [top vidéo] qui a fait Xk vues')",
+    "Recommandation 2 - ACTION PRÉCISE pour corriger un point faible identifié",
+    "Recommandation 3 - ACTION PRÉCISE avec exemple de contenu à créer",
+    "Recommandation 4 - ACTION PRÉCISE liée à la niche du créateur"
   ]
 }
 
 ---
 
-**📝 INSTRUCTIONS POUR LE "resume" (TRÈS IMPORTANT) :**
+**RÈGLES ABSOLUES :**
+1. Le résumé DOIT contenir EXACTEMENT 2 paragraphes séparés par \\n\\n
+2. Le paragraphe 2 DOIT commencer par "Cependant" ou "Toutefois"
+3. La niche DOIT être formatée avec Majuscules & Majuscules (pas de minuscules, pas de /)
+4. Chaque point fort/faible DOIT mentionner un élément concret du compte
+5. JAMAIS de phrases génériques applicables à n'importe quel compte
 
-Le "resume" doit contenir **EXACTEMENT 2 PARAGRAPHES** séparés par \\n\\n (double saut de ligne).
-
-**PARAGRAPHE 1 - LES FORCES (120-150 mots) :**
-
-Commence par une accroche percutante avec le prénom du créateur (extraire depuis nickname si possible, sinon utilise le username) :
-- Ex: "${userInfo.nickname?.split(' ')[0] || userInfo.uniqueId}, tu es une machine à viralité avec ${(userInfo.followerCount/1000000).toFixed(1)}M de followers et ${(userInfo.heartCount/1000000).toFixed(0)}M de likes."
-
-Enchaîne avec une analyse data-driven de ses métriques d'influence :
-- Qualifie son statut : mega-influenceur (>10M), macro-influenceur (1-10M), créateur émergent (100K-1M), talent en devenir (<100K)
-- Cite son engagement rate avec contexte : "engagement ${engagementRate >= 8 ? 'exceptionnel' : engagementRate >= 5 ? 'solide' : engagementRate >= 3 ? 'correct' : 'à améliorer'} à ${engagementRate}%"
-- Identifie ses patterns de succès : formats, durées, types de contenu, collaborations détectées dans les titres
-- Mentionne les codes TikTok maîtrisés : hooks, storytelling, trends, rythme
-- Si bio multilingue ou titres multilingues : parle de portée internationale
-- Parle d'audience fidèle si engagement élevé
-
-Ton : admiratif mais factuel, avec des chiffres précis et des comparaisons percutantes.
-
-**PARAGRAPHE 2 - LES AXES D'AMÉLIORATION (100-130 mots) :**
-
-Commence par "Cependant" ou "Toutefois" pour marquer la transition.
-
-Identifie les patterns d'inconsistance :
-- Écarts de performance entre vidéos : "certaines vidéos ${topViews < avgViews * 5 ? 'stagnent' : 'explosent'} à ${Math.round(topViews/1000000)}M alors que d'autres ${avgViews < 1000000 ? 'peinent à dépasser ' + Math.round(avgViews/1000) + 'K' : 'tournent autour de ' + Math.round(avgViews/1000000) + 'M'}"
-- Compare top performers vs moyenne : "l'écart révèle des patterns non optimisés"
-
-Pointe 3-4 leviers d'optimisation concrets :
-- "Tes hooks manquent de système reproductible" (si variance importante dans les vues)
-- "L'absence de hashtags stratégiques limite ta découvrabilité algorithmique" (si peu de hashtags détectés)
-- "Ton storytelling pourrait être plus structuré pour garantir la rétention" (si engagement faible)
-- "Teste des formats plus courts/longs selon tes top performers" (si durées variées)
-
-Termine sur une vision motivante :
-- "Tu as le talent mais pas encore la machine de guerre éditoriale pour garantir ${Math.round(topViews/1000000)}M+ sur chaque post."
-
-Ton : coach constructif et actionnable, qui pousse à l'amélioration sans démotiver.
-
----
-
-**STYLE GÉNÉRAL DU RÉSUMÉ :**
-- Tutoiement direct ("tu", "tes", "ton")
-- Vocabulaire TikTok natif (viralité, hooks, découvrabilité algorithmique, rétention, formats)
-- Chiffres précis et arrondis intelligemment (18.3M, pas 18,342,567)
-- Comparaisons percutantes ("X fois plus", "écart de 10x entre top et flop")
-- Ton expert/coach, ni trop flatteur ni trop critique
-- **PAS DE BULLET POINTS**, uniquement 2 paragraphes fluides en prose
-
-**INTERDICTIONS ABSOLUES POUR LE RÉSUMÉ :**
-- Ne commence JAMAIS par "Voici le résumé..." ou "Analyse du compte..."
-- N'utilise JAMAIS de sections avec titres (pas de "Forces:", "Faiblesses:")
-- N'utilise JAMAIS de listes à puces ou tirets dans le resume
-- Commence DIRECTEMENT par le prénom/username et l'accroche
-- Les 2 paragraphes doivent être séparés par EXACTEMENT \\n\\n
-
----
-
-**INSTRUCTIONS POUR LES AUTRES CHAMPS :**
-
-**points_forts :** Basé sur les vraies données, valorise ce qui fonctionne (engagement, formats, collaborations)
-**points_faibles :** Constructifs et basés sur les données (variance, optimisation possible)
-**recommandations :** Actionnables et spécifiques (horaires, formats, hashtags, storytelling)
-
-RETOURNE UNIQUEMENT LE JSON, rien d'autre.`;
+RETOURNE UNIQUEMENT LE JSON.`;
 
     const completion = await openai.chat.completions.create({
       model: 'gpt-4o-mini',
       messages: [
         {
           role: 'system',
-          content: 'Tu es un expert en analyse de comptes TikTok. Tu fournis toujours des réponses au format JSON valide avec un résumé en 2 paragraphes séparés par \\n\\n.'
+          content: `Tu es un coach TikTok expert qui produit des analyses UNIQUES et PERSONNALISÉES.
+
+RÈGLES STRICTES :
+- Le résumé contient TOUJOURS 2 paragraphes : Forces puis Axes d'amélioration
+- Le 2ème paragraphe commence TOUJOURS par "Cependant" ou "Toutefois"
+- La niche est TOUJOURS formatée "Mot & Mot" avec majuscules (ex: "Gaming & Tech")
+- Tu mentionnes des éléments concrets : titres de vidéos, chiffres, formats
+- Tu N'UTILISES JAMAIS d'expressions génériques
+
+Tu fournis des réponses JSON valides.`
         },
         {
           role: 'user',
           content: prompt
         }
       ],
-      temperature: 0.7,
+      temperature: 0.85,
+      max_tokens: 1500,
       response_format: { type: 'json_object' }
     });
 
     const analysis = JSON.parse(completion.choices[0].message.content);
+    
+    // POST-TRAITEMENT : Formater la niche correctement
+    if (analysis.niche) {
+      analysis.niche = analysis.niche.replace(/\//g, ' & ');
+      analysis.niche = analysis.niche
+        .split(' ')
+        .map(word => {
+          if (word === '&') return '&';
+          return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
+        })
+        .join(' ');
+    }
+    
+    // Vérifier que le résumé contient bien 2 paragraphes
+    if (analysis.resume && !analysis.resume.includes('\n\n')) {
+      const cependantIndex = analysis.resume.toLowerCase().indexOf('cependant');
+      const toutefoisIndex = analysis.resume.toLowerCase().indexOf('toutefois');
+      const splitIndex = cependantIndex > 0 ? cependantIndex : toutefoisIndex;
+      
+      if (splitIndex > 0) {
+        analysis.resume = analysis.resume.substring(0, splitIndex).trim() + '\n\n' + analysis.resume.substring(splitIndex).trim();
+      }
+    }
     
     return analysis;
 
   } catch (error) {
     console.error('Erreur analyse IA:', error);
     
-    // Retourner une analyse par défaut en cas d'erreur
     return {
       niche: 'Contenu Général',
-      resume: `Compte TikTok avec ${userInfo.followerCount?.toLocaleString()} abonnés. Le compte nécessite une analyse plus approfondie pour déterminer sa stratégie de contenu.`,
+      resume: `@${userInfo.uniqueId}, avec ${userInfo.followerCount?.toLocaleString()} abonnés et ${userInfo.heartCount?.toLocaleString()} likes au total, tu as construit une base solide sur TikTok. Tes vidéos génèrent en moyenne des performances qui méritent d'être analysées pour identifier tes formats gagnants et capitaliser dessus.\n\nCependant, l'écart entre tes meilleures et moins bonnes vidéos suggère des opportunités d'optimisation. En identifiant précisément ce qui différencie tes tops de tes flops - que ce soit le hook, le format ou le sujet - tu pourrais stabiliser tes performances et viser une croissance plus régulière sur chaque publication.`,
       points_forts: [
-        'Présence établie sur TikTok',
-        'Base d\'abonnés existante',
-        'Contenu régulier',
-        'Engagement de la communauté'
+        `Base d'audience de ${userInfo.followerCount?.toLocaleString()} abonnés à activer`,
+        `${userInfo.videoCount} vidéos publiées - données suffisantes pour identifier les patterns gagnants`,
+        'Présence établie sur la plateforme avec historique de contenu analysable',
+        'Potentiel d\'optimisation identifiable via l\'analyse des tops vs flops'
       ],
       points_faibles: [
-        'Stratégie de contenu à affiner',
-        'Optimisation de la bio recommandée',
-        'Cohérence visuelle à améliorer',
-        'Fréquence de publication à analyser'
+        'Écart de performance entre vidéos à analyser pour comprendre les facteurs de succès',
+        'Formats gagnants à identifier et systématiser pour plus de régularité',
+        'Hooks et accroches à tester pour améliorer le taux de rétention',
+        'Consistance des performances à travailler pour stabiliser les vues'
       ],
       recommandations: [
-        'Définir une ligne éditoriale claire',
-        'Optimiser les descriptions avec des CTA',
-        'Analyser les meilleurs horaires de publication',
-        'Créer du contenu basé sur les tendances actuelles'
+        'Analyse tes 3 meilleures vidéos : quel format, quel hook, quel sujet ? Reproduis ces éléments',
+        'Compare avec tes flops : qu\'est-ce qui manque ? Accroche ? Tension ? Sujet porteur ?',
+        'Teste un format "défi" ou "countdown" sur ton prochain contenu pour créer de l\'urgence',
+        'Publie aux heures où tes tops ont été postés pour maximiser la portée initiale'
       ]
     };
   }
 }
 
-// ⭐ FONCTION calculateStats COMPLÈTE (NOUVELLE FORMULE)
+// ============================================
+// FONCTION calculateStats
+// ============================================
 function calculateStats(userInfo, videos) {
   if (!videos || videos.length === 0) {
     return {
@@ -879,7 +1061,6 @@ function calculateStats(userInfo, videos) {
     };
   }
 
-  // ✅ CALCULS DE BASE
   const totalViews = videos.reduce((sum, v) => sum + (v.play_count || 0), 0);
   const totalLikes = videos.reduce((sum, v) => sum + (v.digg_count || 0), 0);
   const totalComments = videos.reduce((sum, v) => sum + (v.comment_count || 0), 0);
@@ -892,12 +1073,10 @@ function calculateStats(userInfo, videos) {
 
   const totalEngagement = totalLikes + totalComments + totalShares;
   
-  // ✅ TAUX D'ENGAGEMENT (basé sur les vues, pas les followers)
   const engagementRate = totalViews > 0 
     ? ((totalEngagement / totalViews) * 100).toFixed(1)
     : 0;
 
-  // Top 3 vidéos
   const sortedVideos = [...videos].sort((a, b) => (b.play_count || 0) - (a.play_count || 0));
   const top3Videos = sortedVideos.slice(0, 3).map(v => ({
     title: v.title,
@@ -906,10 +1085,6 @@ function calculateStats(userInfo, videos) {
     url: `https://www.tiktok.com/@${userInfo.uniqueId}/video/${v.video_id}`
   }));
 
-  // ⭐ NOUVELLE FORMULE - SCORE DE VIRALITÉ (sur 10)
-  // 60% Vues + 30% Engagement + 10% Consistance
-  
-  // 1. SCORE VUES (6 points max) - Basé sur ratio vues/followers
   const ratio = userInfo.followerCount > 0 ? avgViews / userInfo.followerCount : 0;
   let viewsScore = 0;
   
@@ -922,7 +1097,6 @@ function calculateStats(userInfo, videos) {
   else if (ratio >= 0.5) viewsScore = 1;
   else viewsScore = 0.5;
 
-  // 2. SCORE ENGAGEMENT (3 points max)
   const engRate = parseFloat(engagementRate);
   let engagementScore = 0;
   
@@ -934,7 +1108,6 @@ function calculateStats(userInfo, videos) {
   else if (engRate >= 1) engagementScore = 0.7;
   else engagementScore = 0.5;
 
-  // 3. SCORE CONSISTANCE (1 point max)
   const top3Average = top3Videos.length > 0 
     ? top3Videos.reduce((sum, v) => sum + v.views, 0) / top3Videos.length 
     : avgViews;
@@ -947,10 +1120,8 @@ function calculateStats(userInfo, videos) {
   else if (consistency >= 0.15) consistencyScore = 0.4;
   else consistencyScore = 0.2;
 
-  // SCORE TOTAL
   const viralityScore = (viewsScore + engagementScore + consistencyScore).toFixed(1);
 
-  // ⭐ LABEL DU SCORE DE VIRALITÉ (NOUVEAU BARÈME)
   let viralityLabel = '';
   const vScore = parseFloat(viralityScore);
   
@@ -959,7 +1130,6 @@ function calculateStats(userInfo, videos) {
   else if (vScore >= 4) viralityLabel = 'Potentiel viral moyen';
   else viralityLabel = 'Potentiel viral limité';
 
-  // ⭐ POTENTIEL DE CROISSANCE (basé sur vues + engagement)
   let growthPotential = 'Moyen';
   let growthLabel = 'Potentiel stable';
   let growthColor = 'yellow';
@@ -982,9 +1152,7 @@ function calculateStats(userInfo, videos) {
     growthColor = 'orange';
   }
 
-  // ✅ RETOURNER TOUTES LES STATS
   return {
-    // Stats de base
     avgViews,
     avgLikes,
     avgComments,
@@ -992,8 +1160,6 @@ function calculateStats(userInfo, videos) {
     engagementRate: parseFloat(engagementRate),
     topVideo: top3Videos[0] || null,
     top3Videos,
-    
-    // ⭐ NOUVELLES STATS
     viralityScore: parseFloat(viralityScore),
     viralityLabel,
     growthPotential,
@@ -1004,7 +1170,772 @@ function calculateStats(userInfo, videos) {
 
 // ============================================
 // ROUTE : GET /api/user-videos
-// Récupérer les 10 dernières vidéos d'un utilisateur connecté
+// ============================================
+// ============================================
+// TRANSCRIPTION WHISPER & GÉNÉRATION IDÉES
+// À INSÉRER APRÈS calculateStats() ET AVANT app.get('/api/user-videos'...)
+// ============================================
+
+// ============================================
+// FONCTION : Télécharger une vidéo TikTok
+// ============================================
+async function downloadTikTokVideo(videoUrl, videoId) {
+  try {
+    console.log(`📥 Téléchargement vidéo ${videoId}...`);
+    
+    const tikwmUrl = `https://www.tikwm.com/api/?url=${encodeURIComponent(videoUrl)}`;
+    const response = await axios.get(tikwmUrl, { timeout: 15000 });
+    
+    if (!response.data?.data?.play) {
+      throw new Error('URL de téléchargement non trouvée');
+    }
+    
+    const downloadUrl = response.data.data.play;
+    const videoPath = path.join(TEMP_DIR, `${videoId}.mp4`);
+    
+    const videoResponse = await axios({
+      method: 'GET',
+      url: downloadUrl,
+      responseType: 'stream',
+      timeout: 60000,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+      }
+    });
+    
+    const writer = fs.createWriteStream(videoPath);
+    await streamPipeline(videoResponse.data, writer);
+    
+    console.log(`✅ Vidéo ${videoId} téléchargée`);
+    return videoPath;
+    
+  } catch (error) {
+    console.error(`❌ Erreur téléchargement vidéo ${videoId}:`, error.message);
+    return null;
+  }
+}
+
+// ============================================
+// FONCTION : Extraire l'audio d'une vidéo
+// ============================================
+async function extractAudio(videoPath, videoId) {
+  return new Promise((resolve, reject) => {
+    const audioPath = path.join(TEMP_DIR, `${videoId}.mp3`);
+    
+    console.log(`🎵 Extraction audio ${videoId}...`);
+    
+    ffmpeg(videoPath)
+      .toFormat('mp3')
+      .audioCodec('libmp3lame')
+      .audioFrequency(16000)
+      .audioChannels(1)
+      .on('end', () => {
+        console.log(`✅ Audio ${videoId} extrait`);
+        resolve(audioPath);
+      })
+      .on('error', (err) => {
+        console.error(`❌ Erreur extraction audio ${videoId}:`, err.message);
+        reject(err);
+      })
+      .save(audioPath);
+  });
+}
+
+// ============================================
+// FONCTION : Transcrire avec Whisper
+// ============================================
+async function transcribeAudio(audioPath, videoId) {
+  try {
+    console.log(`🎤 Transcription ${videoId}...`);
+    
+    const audioFile = fs.createReadStream(audioPath);
+    
+    const transcription = await openai.audio.transcriptions.create({
+      file: audioFile,
+      model: 'whisper-1',
+      language: 'fr',
+      response_format: 'text'
+    });
+    
+    console.log(`✅ Transcription ${videoId} terminée (${transcription.length} chars)`);
+    return transcription;
+    
+  } catch (error) {
+    console.error(`❌ Erreur transcription ${videoId}:`, error.message);
+    return null;
+  }
+}
+
+// ============================================
+// FONCTION : Nettoyer les fichiers temporaires
+// ============================================
+function cleanupTempFiles(videoId) {
+  try {
+    const videoPath = path.join(TEMP_DIR, `${videoId}.mp4`);
+    const audioPath = path.join(TEMP_DIR, `${videoId}.mp3`);
+    
+    if (fs.existsSync(videoPath)) fs.unlinkSync(videoPath);
+    if (fs.existsSync(audioPath)) fs.unlinkSync(audioPath);
+    
+    console.log(`🧹 Fichiers temp ${videoId} nettoyés`);
+  } catch (error) {
+    console.error(`⚠️ Erreur nettoyage ${videoId}:`, error.message);
+  }
+}
+
+// ============================================
+// FONCTION : Transcrire une vidéo complète
+// ============================================
+async function transcribeVideo(videoUrl, videoId) {
+  let videoPath = null;
+  let audioPath = null;
+  
+  try {
+    videoPath = await downloadTikTokVideo(videoUrl, videoId);
+    if (!videoPath) return null;
+    
+    audioPath = await extractAudio(videoPath, videoId);
+    if (!audioPath) return null;
+    
+    const transcription = await transcribeAudio(audioPath, videoId);
+    return transcription;
+    
+  } catch (error) {
+    console.error(`❌ Erreur transcription vidéo ${videoId}:`, error.message);
+    return null;
+    
+  } finally {
+    cleanupTempFiles(videoId);
+  }
+}
+
+// ============================================
+// FONCTION : Transcrire plusieurs vidéos
+// ============================================
+async function transcribeMultipleVideos(videos, username, maxVideos = 10) {
+  const transcriptions = [];
+  const videosToProcess = videos.slice(0, maxVideos);
+  
+  console.log(`📝 Début transcription de ${videosToProcess.length} vidéos pour @${username}`);
+  
+  for (const video of videosToProcess) {
+    const videoId = video.video_id || video.id;
+    const videoUrl = `https://www.tiktok.com/@${username}/video/${videoId}`;
+    
+    try {
+      const transcription = await transcribeVideo(videoUrl, videoId);
+      
+      if (transcription && transcription.trim().length > 20) {
+        transcriptions.push({
+          videoId,
+          title: video.title || '',
+          views: video.play_count || 0,
+          likes: video.digg_count || 0,
+          transcription: transcription.trim()
+        });
+      }
+      
+      // Pause entre chaque vidéo
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      
+    } catch (error) {
+      console.error(`⚠️ Skip vidéo ${videoId}:`, error.message);
+    }
+  }
+  
+  console.log(`✅ ${transcriptions.length}/${videosToProcess.length} vidéos transcrites`);
+  return transcriptions;
+}
+
+// ============================================
+// FONCTION : Générer des idées personnalisées avec GPT-4
+// ============================================
+async function generatePersonalizedIdeas(transcriptions, niche, account) {
+  try {
+    const transcriptionData = transcriptions.map((t, i) => ({
+      index: i + 1,
+      title: t.title,
+      views: t.views,
+      likes: t.likes,
+      script: t.transcription.substring(0, 500)
+    }));
+
+    const sortedByViews = [...transcriptionData].sort((a, b) => b.views - a.views);
+    const topPerformers = sortedByViews.slice(0, 3);
+    const lowPerformers = sortedByViews.slice(-2);
+
+    const allScripts = transcriptions.map(t => t.transcription).join('\n\n---\n\n');
+
+    const prompt = `Tu es un expert en création de contenu TikTok. Analyse ces transcriptions de vidéos et génère 3 nouvelles idées de contenu ULTRA personnalisées.
+
+**CRÉATEUR : @${account.tiktok_username}**
+- Niche : ${niche}
+- Followers : ${account.followers_count?.toLocaleString() || 'N/A'}
+
+**TOP 3 VIDÉOS (meilleures performances) :**
+${topPerformers.map(v => `📈 "${v.title}" - ${v.views.toLocaleString()} vues
+Script : "${v.script}..."`).join('\n\n')}
+
+**VIDÉOS MOINS PERFORMANTES :**
+${lowPerformers.map(v => `📉 "${v.title}" - ${v.views.toLocaleString()} vues
+Script : "${v.script}..."`).join('\n\n')}
+
+**TOUS LES SCRIPTS POUR ANALYSER LE STYLE :**
+${allScripts.substring(0, 3000)}
+
+---
+
+**TA MISSION :**
+
+1. **ANALYSE LE STYLE DE LANGAGE** du créateur :
+   - Vocabulaire utilisé (familier, soutenu, argot, anglicismes...)
+   - Façon de s'adresser à l'audience (tu/vous, interpellation directe...)
+   - Tics de langage, expressions récurrentes
+   - Rythme et structure des phrases
+   - Ton général (humoristique, sérieux, provocateur, bienveillant...)
+
+2. **IDENTIFIE CE QUI FONCTIONNE** :
+   - Quels sujets performent le mieux ?
+   - Quels types de hooks marchent ?
+   - Quelle structure de vidéo engage le plus ?
+
+3. **GÉNÈRE 3 IDÉES** basées sur ces analyses
+
+---
+
+**FORMAT JSON STRICT :**
+
+{
+  "styleAnalysis": {
+    "vocabulary": "Description du vocabulaire utilisé",
+    "tone": "Description du ton général",
+    "speechPatterns": ["Expression récurrente 1", "Expression récurrente 2", "Expression récurrente 3"],
+    "addressStyle": "Comment le créateur s'adresse à son audience"
+  },
+  "ideas": [
+    {
+      "id": 1,
+      "title": "Titre accrocheur de l'idée (format TikTok)",
+      "description": "Description de l'idée en 2-3 phrases",
+      "whyItWorks": "Explication de pourquoi cette idée fonctionnera basée sur les analyses",
+      "hookSuggestion": "Suggestion de hook basée sur le style du créateur",
+      "icon": "🎯",
+      "category": "transformation|secret|challenge|storytime|tips|comparison"
+    },
+    {
+      "id": 2,
+      "title": "...",
+      "description": "...",
+      "whyItWorks": "...",
+      "hookSuggestion": "...",
+      "icon": "💡",
+      "category": "..."
+    },
+    {
+      "id": 3,
+      "title": "...",
+      "description": "...",
+      "whyItWorks": "...",
+      "hookSuggestion": "...",
+      "icon": "🔥",
+      "category": "..."
+    }
+  ]
+}
+
+**RÈGLES ABSOLUES :**
+- Les idées doivent être DIFFÉRENTES des vidéos existantes mais dans le même style
+- Le titre doit être accrocheur et adapté à TikTok
+- Le hookSuggestion doit utiliser LE MÊME style de langage que le créateur
+- Chaque idée doit capitaliser sur ce qui fonctionne dans les tops
+
+RETOURNE UNIQUEMENT LE JSON.`;
+
+    const completion = await openai.chat.completions.create({
+      model: 'gpt-4o',
+      messages: [
+        {
+          role: 'system',
+          content: `Tu es un expert en stratégie de contenu TikTok. Tu analyses le style unique de chaque créateur pour proposer des idées parfaitement adaptées à leur façon de communiquer.`
+        },
+        {
+          role: 'user',
+          content: prompt
+        }
+      ],
+      temperature: 0.8,
+      max_tokens: 2000,
+      response_format: { type: 'json_object' }
+    });
+
+    const result = JSON.parse(completion.choices[0].message.content);
+    return result;
+
+  } catch (error) {
+    console.error('❌ Erreur génération idées IA:', error);
+    throw error;
+  }
+}
+
+// ============================================
+// FONCTION : Générer un script personnalisé (800-1500 caractères)
+// ============================================
+async function generatePersonalizedScript(title, description, category, transcriptions, niche, account) {
+  try {
+    const existingScripts = transcriptions.map(t => t.transcription).slice(0, 5);
+    
+    const sortedTranscriptions = [...transcriptions].sort((a, b) => b.views - a.views);
+    const topScripts = sortedTranscriptions.slice(0, 3).map(t => ({
+      script: t.transcription,
+      views: t.views
+    }));
+
+    const prompt = `Tu es un expert en copywriting pour TikTok. Génère un script COMPLET et PERSONNALISÉ.
+
+**CRÉATEUR : @${account.tiktok_username}**
+- Niche : ${niche}
+- Followers : ${account.followers_count?.toLocaleString() || 'N/A'}
+
+**IDÉE À SCRIPTER :**
+- Titre : "${title}"
+- Description : ${description}
+- Catégorie : ${category}
+
+**SCRIPTS LES PLUS PERFORMANTS DU CRÉATEUR (pour copier le style) :**
+${topScripts.map((s, i) => `
+--- SCRIPT ${i + 1} (${s.views.toLocaleString()} vues) ---
+${s.script}
+`).join('\n')}
+
+**TOUS LES SCRIPTS POUR LE STYLE :**
+${existingScripts.join('\n\n---\n\n').substring(0, 2500)}
+
+---
+
+**TA MISSION :**
+
+Génère un script COMPLET de **800 à 1500 caractères** qui :
+
+1. **COPIE EXACTEMENT LE STYLE** du créateur :
+   - Même vocabulaire (argot, expressions, anglicismes si utilisés)
+   - Même façon de s'adresser à l'audience
+   - Mêmes tics de langage et expressions favorites
+   - Même rythme de phrases
+   - Même ton (humour, sérieux, provocation, etc.)
+
+2. **STRUCTURE EFFICACE** :
+   - **HOOK (0-3 sec)** : Accroche percutante qui stoppe le scroll
+   - **TENSION (3-15 sec)** : Créer de la curiosité, un enjeu
+   - **CONTENU (15-45 sec)** : La valeur, l'information, l'histoire
+   - **CTA (fin)** : Appel à l'action naturel (follow, like, commentaire)
+
+3. **FORMAT DU SCRIPT** :
+   - Écrit comme le créateur PARLE (pas comme il écrit)
+   - Phrases courtes et percutantes
+   - Pauses naturelles indiquées par "..."
+   - Émotions et intonations entre [crochets] si pertinent
+
+---
+
+**RÈGLES ABSOLUES :**
+- Le script doit faire entre 800 et 1500 caractères
+- Il doit sonner EXACTEMENT comme le créateur parle
+- Pas de langage générique ou corporate
+- Des phrases punchy, pas de blabla
+- Adapté au format vertical TikTok
+
+RETOURNE UNIQUEMENT LE SCRIPT (pas de JSON, pas d'explication).`;
+
+    const completion = await openai.chat.completions.create({
+      model: 'gpt-4o',
+      messages: [
+        {
+          role: 'system',
+          content: `Tu es un copywriter expert en TikTok. Tu dois écrire des scripts qui sonnent EXACTEMENT comme le créateur parle - pas comme un robot ou un marketeur.`
+        },
+        {
+          role: 'user',
+          content: prompt
+        }
+      ],
+      temperature: 0.85,
+      max_tokens: 1500
+    });
+
+    let script = completion.choices[0].message.content.trim();
+    return script;
+
+  } catch (error) {
+    console.error('❌ Erreur génération script IA:', error);
+    throw error;
+  }
+}
+
+// ============================================
+// ROUTE : POST /api/generate-content-ideas
+// ============================================
+app.post('/api/generate-content-ideas', async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    
+    if (!authHeader) {
+      return res.status(401).json({ error: 'Non authentifié' });
+    }
+
+    const token = authHeader.replace('Bearer ', '');
+    const { data: { user }, error: authError } = await supabase.auth.getUser(token);
+    
+    if (authError || !user) {
+      return res.status(401).json({ error: 'Non authentifié' });
+    }
+
+    console.log('💡 Génération d\'idées de contenu pour:', user.id);
+
+    // Récupérer le compte connecté
+    const { data: account, error: accountError } = await supabase
+      .from('connected_accounts')
+      .select('*')
+      .eq('user_id', user.id)
+      .eq('is_connected', true)
+      .single();
+
+    if (accountError || !account) {
+      return res.status(404).json({ error: 'Aucun compte TikTok connecté' });
+    }
+
+    const username = account.tiktok_username;
+    const niche = account.niche || 'Contenu Général';
+    
+    console.log(`📊 Compte: @${username}, Niche: ${niche}`);
+
+    // Récupérer les vidéos
+    const videos = await fetchTikTokUserVideos(username, 15);
+    
+    if (videos.length === 0) {
+      return res.status(404).json({ error: 'Aucune vidéo trouvée' });
+    }
+
+    console.log(`📹 ${videos.length} vidéos récupérées, début transcription...`);
+
+    // Transcrire les vidéos (peut prendre du temps)
+    const transcriptions = await transcribeMultipleVideos(videos, username, 10);
+
+    if (transcriptions.length === 0) {
+      return res.status(500).json({ error: 'Impossible de transcrire les vidéos' });
+    }
+
+    // Analyser le style et générer des idées
+    const ideas = await generatePersonalizedIdeas(transcriptions, niche, account);
+
+    console.log(`✅ ${ideas.ideas?.length || 0} idées générées`);
+
+    // Sauvegarder les transcriptions pour usage ultérieur
+    await supabase
+      .from('connected_accounts')
+      .update({
+        last_transcriptions: transcriptions,
+        transcriptions_updated_at: new Date().toISOString()
+      })
+      .eq('user_id', user.id);
+
+    return res.status(200).json({
+      success: true,
+      ideas,
+      transcriptionsCount: transcriptions.length,
+      niche
+    });
+
+  } catch (error) {
+    console.error('❌ Erreur génération idées:', error);
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+// ============================================
+// ROUTE : POST /api/generate-script
+// ============================================
+app.post('/api/generate-script', async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    const { ideaId, ideaTitle, ideaDescription, ideaCategory } = req.body;
+    
+    if (!authHeader) {
+      return res.status(401).json({ error: 'Non authentifié' });
+    }
+
+    const token = authHeader.replace('Bearer ', '');
+    const { data: { user }, error: authError } = await supabase.auth.getUser(token);
+    
+    if (authError || !user) {
+      return res.status(401).json({ error: 'Non authentifié' });
+    }
+
+    console.log('📝 Génération de script pour:', ideaTitle);
+
+    // Récupérer le compte et les transcriptions
+    const { data: account, error: accountError } = await supabase
+      .from('connected_accounts')
+      .select('*')
+      .eq('user_id', user.id)
+      .eq('is_connected', true)
+      .single();
+
+    if (accountError || !account) {
+      return res.status(404).json({ error: 'Aucun compte TikTok connecté' });
+    }
+
+    const transcriptions = account.last_transcriptions || [];
+    const niche = account.niche || 'Contenu Général';
+
+    if (transcriptions.length === 0) {
+      return res.status(400).json({ error: 'Veuillez d\'abord analyser vos vidéos' });
+    }
+
+    // Générer le script personnalisé
+    const script = await generatePersonalizedScript(
+      ideaTitle,
+      ideaDescription,
+      ideaCategory,
+      transcriptions,
+      niche,
+      account
+    );
+
+    console.log(`✅ Script généré (${script.length} caractères)`);
+
+    return res.status(200).json({
+      success: true,
+      script,
+      characterCount: script.length
+    });
+
+  } catch (error) {
+    console.error('❌ Erreur génération script:', error);
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+// ============================================
+// ROUTE : POST /api/generate-single-idea
+// Génère UNE SEULE nouvelle idée à partir des transcriptions en cache
+// Coût : 1 crédit (au lieu de 3 pour l'analyse complète)
+// ============================================
+app.post('/api/generate-single-idea', async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    const { existingIdeas } = req.body;
+    
+    if (!authHeader) {
+      return res.status(401).json({ error: 'Non authentifié' });
+    }
+
+    const token = authHeader.replace('Bearer ', '');
+    const { data: { user }, error: authError } = await supabase.auth.getUser(token);
+    
+    if (authError || !user) {
+      return res.status(401).json({ error: 'Non authentifié' });
+    }
+
+    console.log('💡 Génération d\'une nouvelle idée pour:', user.id);
+
+    const { data: account, error: accountError } = await supabase
+      .from('connected_accounts')
+      .select('*')
+      .eq('user_id', user.id)
+      .eq('is_connected', true)
+      .single();
+
+    if (accountError || !account) {
+      return res.status(404).json({ error: 'Aucun compte TikTok connecté' });
+    }
+
+    const transcriptions = account.last_transcriptions;
+    const niche = account.niche || 'Contenu Général';
+
+    if (!transcriptions || transcriptions.length === 0) {
+      return res.status(400).json({ 
+        error: 'Aucune analyse en cache. Veuillez d\'abord analyser vos vidéos.',
+        needsFullAnalysis: true
+      });
+    }
+
+    console.log(`📊 Utilisation de ${transcriptions.length} transcriptions en cache`);
+
+    const newIdea = await generateSingleIdea(transcriptions, niche, account, existingIdeas || []);
+
+    console.log('✅ Nouvelle idée générée');
+
+    return res.status(200).json({
+      success: true,
+      idea: newIdea,
+      fromCache: true
+    });
+
+  } catch (error) {
+    console.error('❌ Erreur génération idée:', error);
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+// ============================================
+// FONCTION : Générer UNE SEULE idée
+// ============================================
+async function generateSingleIdea(transcriptions, niche, account, existingIdeas) {
+  try {
+    const transcriptionData = transcriptions.map((t, i) => ({
+      index: i + 1,
+      title: t.title,
+      views: t.views,
+      likes: t.likes,
+      script: t.transcription.substring(0, 400)
+    }));
+
+    const sortedByViews = [...transcriptionData].sort((a, b) => b.views - a.views);
+    const topPerformers = sortedByViews.slice(0, 3);
+    const allScripts = transcriptions.map(t => t.transcription).join('\n\n---\n\n');
+
+    const existingTitles = existingIdeas.map(idea => idea.title).join('\n- ');
+
+    const prompt = `Tu es un expert en création de contenu TikTok. Génère UNE SEULE nouvelle idée de contenu ULTRA personnalisée.
+
+**CRÉATEUR : @${account.tiktok_username}**
+- Niche : ${niche}
+- Followers : ${account.followers_count?.toLocaleString() || 'N/A'}
+
+**TOP 3 VIDÉOS (meilleures performances) :**
+${topPerformers.map(v => `📈 "${v.title}" - ${v.views.toLocaleString()} vues
+Script : "${v.script}..."`).join('\n\n')}
+
+**SCRIPTS POUR ANALYSER LE STYLE :**
+${allScripts.substring(0, 2500)}
+
+${existingTitles ? `**⚠️ IDÉES DÉJÀ GÉNÉRÉES (NE PAS RÉPÉTER) :**
+- ${existingTitles}` : ''}
+
+---
+
+**TA MISSION :**
+
+Génère UNE SEULE nouvelle idée qui :
+1. Est DIFFÉRENTE des idées déjà générées
+2. Capitalise sur ce qui fonctionne (tops)
+3. Utilise le MÊME style de langage que le créateur
+4. Est adaptée à la niche ${niche}
+
+---
+
+**FORMAT JSON STRICT :**
+
+{
+  "idea": {
+    "id": ${Date.now()},
+    "title": "Titre accrocheur de l'idée (format TikTok)",
+    "description": "Description de l'idée en 2-3 phrases",
+    "whyItWorks": "Explication de pourquoi cette idée fonctionnera",
+    "hookSuggestion": "Suggestion de hook basée sur le style du créateur",
+    "icon": "🎯",
+    "category": "transformation|secret|challenge|storytime|tips|comparison|reaction|tutorial"
+  }
+}
+
+**RÈGLES :**
+- L'idée doit être FRAÎCHE et ORIGINALE
+- Le titre doit être accrocheur
+- Le hook doit utiliser le style du créateur
+- Choisis une icône différente si possible (🎯💡🔥⚡✨🎬📱💪)
+
+RETOURNE UNIQUEMENT LE JSON.`;
+
+    const completion = await openai.chat.completions.create({
+      model: 'gpt-4o',
+      messages: [
+        {
+          role: 'system',
+          content: `Tu es un expert en stratégie de contenu TikTok. Tu génères des idées uniques et personnalisées basées sur le style du créateur.`
+        },
+        {
+          role: 'user',
+          content: prompt
+        }
+      ],
+      temperature: 0.9,
+      max_tokens: 800,
+      response_format: { type: 'json_object' }
+    });
+
+    const result = JSON.parse(completion.choices[0].message.content);
+    
+    const idea = result.idea;
+    const icons = ['🎯', '💡', '🔥', '⚡', '✨', '🎬', '📱', '💪', '🚀', '💎'];
+    const bgColors = ['#e8eef7', '#e8f4f8', '#fef3c7', '#fce7f3', '#dbeafe', '#d1fae5', '#fef9c3'];
+    
+    return {
+      ...idea,
+      id: Date.now() + Math.random(),
+      icon: idea.icon || icons[Math.floor(Math.random() * icons.length)],
+      iconBg: bgColors[Math.floor(Math.random() * bgColors.length)],
+      iconColor: '#4f7cff'
+    };
+
+  } catch (error) {
+    console.error('❌ Erreur génération idée unique:', error);
+    throw error;
+  }
+}
+
+// ============================================
+// ROUTE : GET /api/get-cached-ideas
+// ============================================
+app.get('/api/get-cached-ideas', async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    
+    if (!authHeader) {
+      return res.status(401).json({ error: 'Non authentifié' });
+    }
+
+    const token = authHeader.replace('Bearer ', '');
+    const { data: { user }, error: authError } = await supabase.auth.getUser(token);
+    
+    if (authError || !user) {
+      return res.status(401).json({ error: 'Non authentifié' });
+    }
+
+    const { data: account } = await supabase
+      .from('connected_accounts')
+      .select('last_transcriptions, transcriptions_updated_at, niche')
+      .eq('user_id', user.id)
+      .eq('is_connected', true)
+      .single();
+
+    if (!account?.last_transcriptions) {
+      return res.json({ cached: false });
+    }
+
+    // Vérifier si les transcriptions sont récentes (moins de 24h)
+    const updatedAt = new Date(account.transcriptions_updated_at);
+    const now = new Date();
+    const hoursDiff = (now - updatedAt) / (1000 * 60 * 60);
+
+    if (hoursDiff > 24) {
+      return res.json({ cached: false, reason: 'expired' });
+    }
+
+    return res.json({
+      cached: true,
+      transcriptionsCount: account.last_transcriptions.length,
+      niche: account.niche,
+      updatedAt: account.transcriptions_updated_at
+    });
+
+  } catch (error) {
+    console.error('❌ Erreur get cached ideas:', error);
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+// ============================================
+// FIN DU BLOC À INSÉRER
 // ============================================
 app.get('/api/user-videos', async (req, res) => {
   try {
@@ -1023,7 +1954,6 @@ app.get('/api/user-videos', async (req, res) => {
 
     console.log('📹 Récupération des vidéos pour l\'utilisateur:', user.id);
 
-    // Récupérer le compte TikTok connecté
     const { data: account, error: accountError } = await supabase
       .from('connected_accounts')
       .select('tiktok_username, avatar_url')
@@ -1037,11 +1967,9 @@ app.get('/api/user-videos', async (req, res) => {
 
     console.log('🎬 Compte TikTok:', account.tiktok_username);
 
-    // ⏱️ DÉLAI pour éviter le rate limit de l'API TikWM (1 req/sec max)
     console.log('⏱️ Attente de 1.5 seconde pour éviter le rate limit...');
     await new Promise(resolve => setTimeout(resolve, 1500));
 
-    // Récupérer les vidéos via TikWM (avec fallback RapidAPI)
     const videos = await fetchTikTokUserVideos(account.tiktok_username, 10);
 
     console.log(`✅ ${videos.length} vidéos récupérées`);
@@ -1072,7 +2000,6 @@ app.get('/api/user-videos', async (req, res) => {
 
 // ============================================
 // ROUTE : POST /api/analyze-video
-// Analyser une vidéo avec l'IA
 // ============================================
 app.post('/api/analyze-video', async (req, res) => {
   try {
@@ -1092,7 +2019,6 @@ app.post('/api/analyze-video', async (req, res) => {
 
     console.log('🎬 Analyse vidéo demandée:', videoUrl);
 
-    // Extraire l'ID de la vidéo depuis l'URL TikTok
     const videoIdMatch = videoUrl.match(/video\/(\d+)/);
     if (!videoIdMatch) {
       return res.status(400).json({ error: 'URL TikTok invalide' });
@@ -1100,7 +2026,6 @@ app.post('/api/analyze-video', async (req, res) => {
 
     const videoId = videoIdMatch[1];
 
-    // Récupérer les infos de la vidéo via TikWM
     const videoInfoUrl = `https://www.tikwm.com/api/?url=${encodeURIComponent(videoUrl)}`;
     const response = await axios.get(videoInfoUrl);
 
@@ -1110,7 +2035,6 @@ app.post('/api/analyze-video', async (req, res) => {
 
     const videoData = response.data.data;
 
-    // Analyser avec l'IA
     const analysis = await analyzeVideoWithAI(videoData);
 
     console.log('✅ Analyse terminée');
@@ -1136,10 +2060,11 @@ app.post('/api/analyze-video', async (req, res) => {
   }
 });
 
-// Fonction pour analyser une vidéo avec l'IA
+// ============================================
+// FONCTION ANALYSE VIDEO IA
+// ============================================
 async function analyzeVideoWithAI(videoData) {
   try {
-    // Calculer des métriques de performance
     const views = videoData.play_count || 0;
     const likes = videoData.digg_count || 0;
     const comments = videoData.comment_count || 0;
@@ -1148,69 +2073,118 @@ async function analyzeVideoWithAI(videoData) {
     const engagementRate = views > 0 ? (((likes + comments + shares) / views) * 100).toFixed(2) : 0;
     const likeRate = views > 0 ? ((likes / views) * 100).toFixed(2) : 0;
     
-    const prompt = `Tu es un expert en analyse de vidéos TikTok. Analyse cette vidéo et fournis un rapport détaillé.
+    const prompt = `Tu es un expert TikTok. Analyse cette vidéo SPÉCIFIQUE de manière UNIQUE.
 
-**Informations de la vidéo:**
-- Titre: "${videoData.title || 'Sans titre'}"
-- Vues: ${views.toLocaleString()}
-- Likes: ${likes.toLocaleString()}
-- Commentaires: ${comments.toLocaleString()}
-- Partages: ${shares.toLocaleString()}
-- Durée: ${videoData.duration || 0} secondes
-- Taux d'engagement: ${engagementRate}%
-- Ratio likes/vues: ${likeRate}%
+**VIDÉO :**
+- Titre : "${videoData.title || 'Sans titre'}"
+- Vues : ${views.toLocaleString()}
+- Likes : ${likes.toLocaleString()}
+- Commentaires : ${comments.toLocaleString()}
+- Partages : ${shares.toLocaleString()}
+- Durée : ${videoData.duration || 0}s
+- Engagement : ${engagementRate}%
+- Ratio likes/vues : ${likeRate}%
 
-**Critères d'évaluation du score (sur 10):**
-- 0-2: Très faible performance (< 100 vues, engagement < 1%)
-- 2-4: Faible performance (100-1K vues, engagement 1-3%)
-- 4-6: Performance moyenne (1K-10K vues, engagement 3-5%)
-- 6-7.5: Bonne performance (10K-50K vues, engagement 5-8%)
-- 7.5-9: Très bonne performance (50K-200K vues, engagement 8-12%)
-- 9-10: Excellente performance (>200K vues, engagement >12%)
+---
 
-**IMPORTANT:** Le score doit refléter la VRAIE performance. Une vidéo avec ${views.toLocaleString()} vues et ${engagementRate}% d'engagement ne peut PAS avoir 8.5/10 sauf si elle dépasse vraiment 50K vues avec un bon engagement.
+**CRITÈRES DE SCORE (respecte strictement) :**
+- 0-2: < 100 vues
+- 2-4: 100-1K vues
+- 4-6: 1K-10K vues
+- 6-7.5: 10K-50K vues
+- 7.5-9: 50K-200K vues
+- 9-10: >200K vues
 
-**Format de réponse attendu (JSON strict):**
+---
+
+**INSTRUCTIONS CRUCIALES :**
+
+1. **ANALYSE LE TITRE RÉEL** : "${videoData.title || 'Sans titre'}"
+   - Qu'est-ce que ce titre révèle sur le contenu ?
+   - Quel angle/hook est utilisé ?
+   - Quelle émotion est ciblée ?
+
+2. **SOIS SPÉCIFIQUE À CETTE VIDÉO**
+   - Mentionne des éléments CONCRETS du titre
+   - Adapte ton analyse au SUJET réel de la vidéo
+   - Ne fais pas d'analyse générique
+
+3. **VARIE TON VOCABULAIRE**
+   - Utilise des formulations DIFFÉRENTES à chaque analyse
+   - Évite les phrases toutes faites
+
+---
+
+**⛔ EXPRESSIONS INTERDITES (ne les utilise JAMAIS) :**
+- "situation universelle"
+- "authenticité brute"
+- "défi temps réel"
+- "connexion émotionnelle instantanée"
+- "tension narrative addictive"
+- "le cerveau du spectateur"
+- "mécanique psychologique"
+- "identification immédiate"
+
+**✅ À LA PLACE, utilise des formulations FRAÎCHES et SPÉCIFIQUES :**
+- Décris ce qui se passe DANS cette vidéo précise
+- Utilise le vocabulaire du SUJET de la vidéo
+- Sois concret : "le moment où elle montre X", "l'accroche sur Y"
+
+---
+
+**FORMAT JSON :**
+
 {
-  "summary": "Un paragraphe résumant la performance et le contenu de la vidéo (2-3 phrases maximum).",
+  "summary": "4-5 phrases. Analyse CETTE vidéo spécifiquement. Mentionne des éléments du titre. Explique pourquoi CE contenu particulier fonctionne ou pas. Pas de phrases génériques.",
+  
   "strengths": [
-    "Point fort 1 - Description détaillée et spécifique aux métriques",
-    "Point fort 2 - Description détaillée et spécifique aux métriques",
-    "Point fort 3 - Description détaillée et spécifique aux métriques"
+    "Point fort SPÉCIFIQUE à cette vidéo - mentionne un élément concret du contenu",
+    "Deuxième point fort UNIQUE - basé sur ce que montre vraiment la vidéo",
+    "Troisième point fort PRÉCIS - lié au sujet/angle de cette vidéo"
   ],
+  
   "improvements": [
-    "Point d'amélioration 1 - Suggestion concrète basée sur les métriques",
-    "Point d'amélioration 2 - Suggestion concrète basée sur les métriques",
-    "Point d'amélioration 3 - Suggestion concrète basée sur les métriques"
+    "Amélioration concrète pour CE type de contenu",
+    "Suggestion spécifique basée sur le sujet de la vidéo",
+    "Conseil adapté à cette niche/ce format"
   ],
+  
   "recommendations": [
-    "Recommandation 1 - Action concrète et mesurable",
-    "Recommandation 2 - Action concrète et mesurable",
-    "Recommandation 3 - Action concrète et mesurable"
+    "Action concrète en lien avec le thème de cette vidéo",
+    "Idée de contenu similaire à tester",
+    "Optimisation spécifique pour ce format"
   ],
-  "score": 6.5
+  
+  "score": X.X
 }
 
-**Instructions:**
-1. Base ton analyse UNIQUEMENT sur les métriques réelles
-2. Le score doit être RÉALISTE et correspondre aux critères ci-dessus
-3. Sois honnête : une vidéo avec peu de vues = score bas
-4. Sois spécifique et actionnable
-5. RETOURNE UNIQUEMENT LE JSON`;
+---
+
+RETOURNE UNIQUEMENT LE JSON.`;
 
     const completion = await openai.chat.completions.create({
       model: 'gpt-4o-mini',
       messages: [
         {
           role: 'system',
-          content: 'Tu es un expert en analyse de vidéos TikTok. Tu fournis toujours des scores RÉALISTES basés sur les vraies performances. Tu ne donnes jamais de scores élevés par défaut. Tu fournis toujours des réponses au format JSON valide.'
+          content: `Tu es un analyste TikTok. Tu produis des analyses UNIQUES et SPÉCIFIQUES à chaque vidéo.
+
+RÈGLES :
+- Chaque analyse doit être DIFFÉRENTE
+- Mentionne des éléments CONCRETS du titre/contenu
+- N'utilise JAMAIS d'expressions génériques répétitives
+- Adapte ton vocabulaire au SUJET de la vidéo
+- Sois précis, pas vague
+
+Tu fournis des réponses JSON valides.`
         },
         {
           role: 'user',
           content: prompt
         }
       ],
-      temperature: 0.7,
+      temperature: 0.9,
+      max_tokens: 1200,
       response_format: { type: 'json_object' }
     });
 
@@ -1220,7 +2194,6 @@ async function analyzeVideoWithAI(videoData) {
   } catch (error) {
     console.error('Erreur analyse IA vidéo:', error);
     
-    // Retour par défaut AVEC SCORE RÉALISTE
     const views = videoData.play_count || 0;
     let defaultScore = 5.0;
     
@@ -1232,21 +2205,21 @@ async function analyzeVideoWithAI(videoData) {
     else defaultScore = 8.5;
     
     return {
-      summary: "Analyse basée sur les métriques de performance de la vidéo.",
+      summary: `Cette vidéo "${(videoData.title || 'Sans titre').substring(0, 50)}..." mérite une analyse approfondie. Les métriques actuelles suggèrent des axes d'optimisation, notamment sur l'accroche initiale et la structure du contenu.`,
       strengths: [
-        "Contenu publié sur TikTok",
-        "Format adapté à la plateforme",
-        "Vidéo accessible au public"
+        "Contenu publié et indexé par l'algorithme TikTok",
+        "Format vidéo adapté à la consommation mobile",
+        "Base de données disponible pour analyser les performances"
       ],
       improvements: [
-        "Optimiser le titre pour plus de clics",
-        "Améliorer le hook des 3 premières secondes",
-        "Augmenter la fréquence de publication"
+        "Travailler l'accroche des 2 premières secondes pour capter l'attention immédiatement",
+        "Structurer le contenu avec un enjeu clair dès le début",
+        "Ajouter des éléments visuels ou textuels pour renforcer le message"
       ],
       recommendations: [
-        "Analyser les heures de publication optimales",
-        "Créer du contenu similaire aux vidéos performantes",
-        "Interagir davantage avec les commentaires"
+        "Tester différents hooks en début de vidéo",
+        "Analyser les vidéos similaires qui performent mieux dans cette niche",
+        "Publier à des horaires optimaux pour maximiser la portée initiale"
       ],
       score: defaultScore
     };
@@ -1254,7 +2227,7 @@ async function analyzeVideoWithAI(videoData) {
 }
 
 // ============================================
-// ROUTE : POST /api/tiktok-account-stats (POUR ONBOARDING)
+// ROUTE : POST /api/tiktok-account-stats (ONBOARDING)
 // ============================================
 app.post('/api/tiktok-account-stats', async (req, res) => {
   try {
@@ -1280,11 +2253,9 @@ app.post('/api/tiktok-account-stats', async (req, res) => {
 
     const cleanUsername = username.replace('@', '');
 
-    // ⏱️ DÉLAI pour éviter le rate limit
     console.log('⏱️ Attente de 1.5 seconde pour éviter le rate limit...');
     await new Promise(resolve => setTimeout(resolve, 1500));
 
-    // 1. Récupérer les infos du compte (avec fallback RapidAPI)
     const userInfo = await fetchTikTokUserInfo(cleanUsername);
 
     if (!userInfo) {
@@ -1293,7 +2264,6 @@ app.post('/api/tiktok-account-stats', async (req, res) => {
 
     console.log(`✅ Compte trouvé: ${userInfo.followerCount} followers`);
 
-    // 2. Récupérer les 10 dernières vidéos (avec fallback RapidAPI)
     const videos = await fetchTikTokUserVideos(cleanUsername, 10);
 
     if (videos.length === 0) {
@@ -1302,7 +2272,6 @@ app.post('/api/tiktok-account-stats', async (req, res) => {
 
     console.log(`📹 ${videos.length} vidéos récupérées`);
 
-    // 3. Calculer les statistiques
     const totalViews = videos.reduce((sum, v) => sum + (v.play_count || 0), 0);
     const totalLikes = videos.reduce((sum, v) => sum + (v.digg_count || 0), 0);
     const totalComments = videos.reduce((sum, v) => sum + (v.comment_count || 0), 0);
@@ -1313,7 +2282,6 @@ app.post('/api/tiktok-account-stats', async (req, res) => {
     const engagementRate = totalViews > 0 ? ((totalEngagement / totalViews) * 100).toFixed(1) : 0;
     const followers = userInfo.followerCount || 0;
 
-    // 4. Détecter la niche avec OpenAI
     const videoDescriptions = videos.map(v => v.title || '').filter(t => t).join(' ');
     
     let niche = 'Contenu Général';
@@ -1338,7 +2306,6 @@ app.post('/api/tiktok-account-stats', async (req, res) => {
       console.error('Erreur détection niche:', error);
     }
 
-    // 5. Générer le résumé du compte avec OpenAI
     let summary = `Compte spécialisé dans ${niche} avec une audience de ${followers} abonnés. Les vidéos génèrent en moyenne ${avgViews} vues avec un taux d'engagement de ${engagementRate}%.`;
     try {
       const summaryCompletion = await openai.chat.completions.create({
@@ -1361,7 +2328,6 @@ app.post('/api/tiktok-account-stats', async (req, res) => {
       console.error('Erreur génération résumé:', error);
     }
 
-    // 6. Générer les recommandations avec OpenAI
     let recommendations = [
       'Publiez régulièrement pour maintenir l\'engagement de votre audience',
       'Utilisez des hashtags pertinents pour augmenter votre visibilité',
@@ -1398,7 +2364,6 @@ app.post('/api/tiktok-account-stats', async (req, res) => {
       console.error('Erreur génération recommandations:', error);
     }
 
-    // 7. Calculer le score de viralité (sur 10)
     let viralityScore = 5.0;
     const engRate = parseFloat(engagementRate);
     
@@ -1407,14 +2372,12 @@ app.post('/api/tiktok-account-stats', async (req, res) => {
     else if (engRate >= 4) viralityScore = 6.5;
     else if (engRate >= 2) viralityScore = 5.5;
 
-    // Ajuster selon les vues moyennes
     if (avgViews > 100000) viralityScore += 0.5;
     else if (avgViews > 50000) viralityScore += 0.3;
     else if (avgViews < 1000) viralityScore -= 0.5;
 
     viralityScore = Math.min(10, Math.max(1, viralityScore)).toFixed(1);
 
-    // 8. Déterminer le potentiel de croissance
     let growthPotential = 'Moyen';
     let growthLabel = 'Potentiel stable';
 
@@ -1429,7 +2392,6 @@ app.post('/api/tiktok-account-stats', async (req, res) => {
       growthLabel = 'Nécessite des améliorations';
     }
 
-    // 9. Label du score de viralité
     let viralityLabel = 'Bon potentiel';
     const vScore = parseFloat(viralityScore);
     if (vScore >= 8.5) viralityLabel = 'Excellent potentiel de croissance';
@@ -1437,7 +2399,6 @@ app.post('/api/tiktok-account-stats', async (req, res) => {
     else if (vScore >= 5.5) viralityLabel = 'Potentiel moyen';
     else viralityLabel = 'Potentiel à développer';
 
-    // 10. Formater les top 3 vidéos
     const topVideos = videos
       .sort((a, b) => (b.play_count || 0) - (a.play_count || 0))
       .slice(0, 3)
@@ -1447,63 +2408,61 @@ app.post('/api/tiktok-account-stats', async (req, res) => {
         likes: v.digg_count || 0
       }));
 
-   // 11. Générer les Points Forts avec OpenAI
-let strengths = [
-  'Contenu authentique et inspirant qui crée une connexion émotionnelle',
-  'Cohérence visuelle excellente avec une identité de marque forte',
-  `Taux d'engagement de ${engagementRate}% ${engRate >= 4 ? 'au-dessus' : 'proche'} de la moyenne`,
-  'Publication régulière qui fidélise l\'audience'
-];
+    let strengths = [
+      'Contenu authentique et inspirant qui crée une connexion émotionnelle',
+      'Cohérence visuelle excellente avec une identité de marque forte',
+      `Taux d'engagement de ${engagementRate}% ${engRate >= 4 ? 'au-dessus' : 'proche'} de la moyenne`,
+      'Publication régulière qui fidélise l\'audience'
+    ];
 
-try {
-  const strengthsCompletion = await openai.chat.completions.create({
-    model: 'gpt-4o-mini',
-    messages: [
-      {
-        role: 'system',
-        content: 'Tu es un expert en analyse de comptes TikTok. Génère 4 points forts spécifiques et détaillés en français basés sur les vraies données du compte. Chaque point doit être une phrase complète. Retourne uniquement les 4 points forts, un par ligne, sans numérotation.'
-      },
-      {
-        role: 'user',
-        content: `Compte TikTok @${cleanUsername}. Niche: ${niche}. Stats: ${followers} abonnés, ${avgViews} vues moyennes, ${engagementRate}% engagement, ${userInfo.videoCount} vidéos. Descriptions des vidéos: ${videoDescriptions.substring(0, 500)}. Génère 4 points forts précis et valorisants basés sur ces données réelles.`
+    try {
+      const strengthsCompletion = await openai.chat.completions.create({
+        model: 'gpt-4o-mini',
+        messages: [
+          {
+            role: 'system',
+            content: 'Tu es un expert en analyse de comptes TikTok. Génère 4 points forts spécifiques et détaillés en français basés sur les vraies données du compte. Chaque point doit être une phrase complète. Retourne uniquement les 4 points forts, un par ligne, sans numérotation.'
+          },
+          {
+            role: 'user',
+            content: `Compte TikTok @${cleanUsername}. Niche: ${niche}. Stats: ${followers} abonnés, ${avgViews} vues moyennes, ${engagementRate}% engagement, ${userInfo.videoCount} vidéos. Descriptions des vidéos: ${videoDescriptions.substring(0, 500)}. Génère 4 points forts précis et valorisants basés sur ces données réelles.`
+          }
+        ],
+        max_tokens: 300,
+        temperature: 0.7
+      });
+
+      const strengthsText = strengthsCompletion.choices[0]?.message?.content?.trim();
+      if (strengthsText) {
+        const parsedStrengths = strengthsText.split('\n').filter(s => s.trim().length > 10).map(s => s.replace(/^\d+\.\s*/, '').trim());
+        if (parsedStrengths.length >= 4) {
+          strengths = parsedStrengths.slice(0, 4);
+        }
       }
-    ],
-    max_tokens: 300,
-    temperature: 0.7
-  });
-
-  const strengthsText = strengthsCompletion.choices[0]?.message?.content?.trim();
-  if (strengthsText) {
-    const parsedStrengths = strengthsText.split('\n').filter(s => s.trim().length > 10).map(s => s.replace(/^\d+\.\s*/, '').trim());
-    if (parsedStrengths.length >= 4) {
-      strengths = parsedStrengths.slice(0, 4);
+    } catch (error) {
+      console.error('Erreur génération points forts:', error);
     }
-  }
-} catch (error) {
-  console.error('Erreur génération points forts:', error);
-}
 
-// 12. Construire la réponse avec TOUTES les stats
-const analysisData = {
-  username: cleanUsername,
-  viralityScore: parseFloat(viralityScore),
-  viralityLabel,
-  growthPotential,
-  growthLabel,
-  stats: {
-    engagementRate: parseFloat(engagementRate),
-    followers,
-    avgViews,
-    totalLikes: userInfo.heartCount || 0,
-    videoCount: userInfo.videoCount || 0,
-    following: userInfo.followingCount || 0
-  },
-  niche,
-  summary,
-  topVideos,
-  recommendations,
-  strengths
-};
+    const analysisData = {
+      username: cleanUsername,
+      viralityScore: parseFloat(viralityScore),
+      viralityLabel,
+      growthPotential,
+      growthLabel,
+      stats: {
+        engagementRate: parseFloat(engagementRate),
+        followers,
+        avgViews,
+        totalLikes: userInfo.heartCount || 0,
+        videoCount: userInfo.videoCount || 0,
+        following: userInfo.followingCount || 0
+      },
+      niche,
+      summary,
+      topVideos,
+      recommendations,
+      strengths
+    };
 
     console.log('✅ Analyse onboarding terminée');
 
@@ -1519,13 +2478,12 @@ const analysisData = {
 });
 
 // ============================================
-// ROUTE DE TEST TIKTOK
+// ROUTES DE TEST
 // ============================================
 app.get('/api/test-tiktok/:username', async (req, res) => {
   try {
     console.log('🧪 TEST: Récupération de', req.params.username);
     
-    // Appeler directement la fonction fetchTikTokUserInfo
     const userInfo = await fetchTikTokUserInfo(req.params.username);
     
     if (userInfo) {
@@ -1541,11 +2499,11 @@ app.get('/api/test-tiktok/:username', async (req, res) => {
   }
 });
 
-// Route de test
 app.get('/api/health', (req, res) => {
   res.json({ 
     status: 'ok', 
     message: 'CreateShorts API is running',
+    whop: 'configured',
     timestamp: new Date().toISOString()
   });
 });
@@ -1562,7 +2520,6 @@ app.post('/api/analyze-tracked-account', async (req, res) => {
 
     console.log(`📊 Analyse du compte tracké: @${cleanUsername}`);
 
-    // 1. Récupérer les infos du compte (avec fallback RapidAPI)
     const userInfo = await fetchTikTokUserInfo(cleanUsername);
 
     if (!userInfo) {
@@ -1571,12 +2528,10 @@ app.post('/api/analyze-tracked-account', async (req, res) => {
 
     console.log(`✅ Compte trouvé: ${userInfo.followerCount} followers`);
 
-    // 2. Récupérer les vidéos (avec fallback RapidAPI)
     const videos = await fetchTikTokUserVideos(cleanUsername, 10);
 
     console.log(`📹 ${videos.length} vidéos récupérées`);
 
-    // 3. Calculer les stats avec la même fonction que connect-tiktok
     const stats = calculateStats(userInfo, videos);
 
     console.log('📊 Stats calculées:', {
@@ -1587,7 +2542,6 @@ app.post('/api/analyze-tracked-account', async (req, res) => {
       growthColor: stats.growthColor
     });
 
-    // 4. Retourner les données
     return res.status(200).json({
       success: true,
       account: {
@@ -1598,8 +2552,6 @@ app.post('/api/analyze-tracked-account', async (req, res) => {
         following: userInfo.followingCount,
         totalLikes: userInfo.heartCount,
         videoCount: userInfo.videoCount,
-        
-        // Stats calculées
         viralityScore: stats.viralityScore,
         viralityLabel: stats.viralityLabel,
         growthPotential: stats.growthPotential,
@@ -1617,11 +2569,13 @@ app.post('/api/analyze-tracked-account', async (req, res) => {
   }
 });
 
-
-// Démarrer le serveur
+// ============================================
+// DÉMARRER LE SERVEUR
+// ============================================
 app.listen(PORT, () => {
   console.log(`✅ Backend CreateShorts démarré sur le port ${PORT}`);
   console.log(`📍 URL: http://localhost:${PORT}`);
+  console.log(`🔗 Whop webhook: /api/webhooks/whop`);
 });
 
 export default app;
