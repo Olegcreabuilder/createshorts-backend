@@ -148,8 +148,8 @@ if (!email) {
           whop_membership_id: membershipId,
           whop_user_id: userId,
           subscription_start: new Date().toISOString(),
-          credits_video: 150,
-          credits_ideas: 150
+          credits_video_analysis: 150,    // ✅ Remplacé
+          credits_idea_generation: 150    // ✅ Remplacé
         })
         .eq('id', profile.id);
 
