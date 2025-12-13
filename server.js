@@ -70,48 +70,54 @@ app.post('/api/webhooks/whop', express.raw({ type: 'application/json' }), async 
       
       console.log(`👤 [WHOP] User: ${username} (${userId}), Membership: ${membershipId}`);
 
-      // Récupérer l'email via l'API Whop
-      let email = null;
-      
-      if (userId && process.env.WHOP_API_KEY) {
-        try {
-          const whopResponse = await axios.get(`https://api.whop.com/api/v5/users/${userId}`, {
-            headers: {
-              'Authorization': `Bearer ${process.env.WHOP_API_KEY}`
-            }
-          });
-          email = whopResponse.data?.email;
-          console.log(`📧 [WHOP] Email récupéré via API: ${email}`);
-        } catch (apiError) {
-          console.error('⚠️ [WHOP] Erreur API Whop:', apiError.message);
-        }
-      }
+// Récupérer l'email via l'API Whop ou via pending
+let email = null;
 
-      // Si pas d'email via API, essayer de trouver par d'autres moyens
-      if (!email) {
-        // Chercher dans les métadonnées ou checkout_session
-        email = data.email || data.user?.email || data.checkout_session?.email;
+// Méthode 1 : Essayer via l'API Whop
+if (process.env.WHOP_API_KEY) {
+  try {
+    const whopResponse = await axios.get(`https://api.whop.com/api/v5/memberships/${membershipId}`, {
+      headers: {
+        'Authorization': `Bearer ${process.env.WHOP_API_KEY}`
       }
+    });
+    email = whopResponse.data?.email || whopResponse.data?.user?.email;
+    if (email) console.log(`📧 [WHOP] Email via API: ${email}`);
+  } catch (apiError) {
+    console.log('⚠️ [WHOP] API membership non disponible, utilisation du pending...');
+  }
+}
 
-      if (!email) {
-        console.error('❌ [WHOP] Email non trouvé pour:', username);
-        // Essayer de matcher par le nom d'utilisateur Whop stocké précédemment
-        const { data: profileByWhopId } = await supabaseWebhook
-          .from('profiles')
-          .select('id, email')
-          .eq('whop_user_id', userId)
-          .single();
-        
-        if (profileByWhopId) {
-          email = profileByWhopId.email;
-          console.log(`📧 [WHOP] Email trouvé via whop_user_id: ${email}`);
-        }
-      }
+// Méthode 2 : Chercher dans les données du webhook
+if (!email) {
+  email = data.email || data.user?.email || data.checkout_session?.email;
+  if (email) console.log(`📧 [WHOP] Email via webhook data: ${email}`);
+}
 
-      if (!email) {
-        console.error('❌ [WHOP] Impossible de trouver l\'email de l\'utilisateur');
-        return res.status(200).json({ received: true, error: 'Email not found' });
-      }
+// Méthode 3 : Chercher un paiement pending récent (< 10 min)
+if (!email) {
+  const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+  
+  const { data: pendingProfiles } = await supabaseWebhook
+    .from('profiles')
+    .select('id, email, whop_pending_email, whop_pending_at')
+    .not('whop_pending_at', 'is', null)
+    .gte('whop_pending_at', tenMinutesAgo)
+    .order('whop_pending_at', { ascending: false })
+    .limit(5);
+
+  if (pendingProfiles && pendingProfiles.length > 0) {
+    // Prendre le plus récent
+    const pendingProfile = pendingProfiles[0];
+    email = pendingProfile.whop_pending_email || pendingProfile.email;
+    console.log(`📧 [WHOP] Email via pending: ${email}`);
+  }
+}
+
+if (!email) {
+  console.error('❌ [WHOP] Impossible de trouver l\'email');
+  return res.status(200).json({ received: true, error: 'Email not found' });
+}
 
       // Trouver l'utilisateur par email
       const { data: profile, error: findError } = await supabaseWebhook
