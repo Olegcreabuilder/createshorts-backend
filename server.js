@@ -695,7 +695,7 @@ async function fetchTikTokUserInfo(username) {
     const url = `https://www.tikwm.com/api/user/info?unique_id=${username}`;
     
     console.log('📡 Envoi requête à TikWM...');
-    const response = await axios.get(url, { timeout: 10000 });
+    const response = await axios.get(url, { timeout: 30000 });
     
     console.log('✅ Réponse reçue, status:', response.status);
     
