@@ -684,172 +684,383 @@ app.post('/api/connect-tiktok', async (req, res) => {
 });
 
 // ============================================
-// FONCTIONS TIKTOK AVEC FALLBACK RAPIDAPI
+// FONCTIONS TIKTOK AVEC MULTI-FALLBACK ROBUSTE
 // ============================================
 
-async function fetchTikTokUserInfo(username) {
-  try {
-    console.log('🔧 Tentative avec API TikWM (gratuite)...');
-    console.log('📝 Username:', username);
-    
-    const url = `https://www.tikwm.com/api/user/info?unique_id=${username}`;
-    
-    console.log('📡 Envoi requête à TikWM...');
-    const response = await axios.get(url, { timeout: 30000 });
-    
-    console.log('✅ Réponse reçue, status:', response.status);
-    
-    if (response.data && response.data.data && response.data.data.user) {
-      const userData = response.data.data;
-      console.log('✅ TikWM - Utilisateur trouvé:', userData.user.nickname);
-      
-      return {
-        id: userData.user.id,
-        uniqueId: userData.user.unique_id || username,
-        nickname: userData.user.nickname,
-        avatarLarger: userData.user.avatarLarger,
-        avatarMedium: userData.user.avatarMedium,
-        signature: userData.user.signature,
-        followerCount: userData.stats?.followerCount || userData.stats?.follower_count || 0,
-        followingCount: userData.stats?.followingCount || userData.stats?.following_count || 0,
-        heartCount: userData.stats?.heartCount || userData.stats?.heart_count || 0,
-        videoCount: userData.stats?.videoCount || userData.stats?.video_count || 0,
-        verified: userData.user.verified || false
-      };
+// Fonction utilitaire pour attendre
+const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+// Fonction utilitaire pour retry
+async function withRetry(fn, retries = 2, delayMs = 1000) {
+  for (let i = 0; i <= retries; i++) {
+    try {
+      return await fn();
+    } catch (error) {
+      if (i === retries) throw error;
+      console.log(`⏳ Retry ${i + 1}/${retries} après erreur: ${error.message}`);
+      await delay(delayMs);
     }
-    
-    console.log('❌ TikWM - Pas de données utilisateur, tentative RapidAPI...');
-    throw new Error('Pas de données TikWM');
-    
-  } catch (tikwmError) {
-    console.error('❌ Erreur TikWM:', tikwmError.message);
-    console.log('🔄 Fallback vers RapidAPI...');
-    
-    return await fetchTikTokUserInfoRapidAPI(username);
   }
 }
 
-async function fetchTikTokUserInfoRapidAPI(username) {
-  try {
-    console.log('🔧 Tentative avec RapidAPI...');
+// Headers pour simuler un vrai navigateur
+const browserHeaders = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  'Accept': 'application/json, text/plain, */*',
+  'Accept-Language': 'fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7',
+  'Referer': 'https://www.tikwm.com/',
+  'Origin': 'https://www.tikwm.com'
+};
+
+// ============================================
+// FONCTIONS USER INFO
+// ============================================
+
+// API 1: TikWM Principal
+async function fetchFromTikWM(username) {
+  console.log('🔧 [API 1] TikWM Principal...');
+  
+  const response = await axios.get(
+    `https://www.tikwm.com/api/user/info?unique_id=${username}`,
+    { 
+      timeout: 20000,
+      headers: browserHeaders
+    }
+  );
+  
+  if (response.data?.data?.user) {
+    const userData = response.data.data;
+    console.log('✅ [API 1] TikWM - Utilisateur trouvé:', userData.user.nickname);
     
-    const options = {
-      method: 'GET',
-      url: 'https://tiktok-scraper7.p.rapidapi.com/user/info',
+    return {
+      id: userData.user.id,
+      uniqueId: userData.user.unique_id || username,
+      nickname: userData.user.nickname,
+      avatarLarger: userData.user.avatarLarger,
+      avatarMedium: userData.user.avatarMedium,
+      signature: userData.user.signature,
+      followerCount: userData.stats?.followerCount || userData.stats?.follower_count || 0,
+      followingCount: userData.stats?.followingCount || userData.stats?.following_count || 0,
+      heartCount: userData.stats?.heartCount || userData.stats?.heart_count || 0,
+      videoCount: userData.stats?.videoCount || userData.stats?.video_count || 0,
+      verified: userData.user.verified || false
+    };
+  }
+  
+  throw new Error('Pas de données TikWM');
+}
+
+// API 2: TikWM Endpoint alternatif (POST)
+async function fetchFromTikWM2(username) {
+  console.log('🔧 [API 2] TikWM Alternatif POST...');
+  
+  const response = await axios.post(
+    'https://www.tikwm.com/api/user/info',
+    `unique_id=${username}`,
+    { 
+      timeout: 20000,
+      headers: {
+        ...browserHeaders,
+        'Content-Type': 'application/x-www-form-urlencoded'
+      }
+    }
+  );
+  
+  if (response.data?.data?.user) {
+    const userData = response.data.data;
+    console.log('✅ [API 2] TikWM POST - Utilisateur trouvé:', userData.user.nickname);
+    
+    return {
+      id: userData.user.id,
+      uniqueId: userData.user.unique_id || username,
+      nickname: userData.user.nickname,
+      avatarLarger: userData.user.avatarLarger,
+      avatarMedium: userData.user.avatarMedium,
+      signature: userData.user.signature,
+      followerCount: userData.stats?.followerCount || userData.stats?.follower_count || 0,
+      followingCount: userData.stats?.followingCount || userData.stats?.following_count || 0,
+      heartCount: userData.stats?.heartCount || userData.stats?.heart_count || 0,
+      videoCount: userData.stats?.videoCount || userData.stats?.video_count || 0,
+      verified: userData.user.verified || false
+    };
+  }
+  
+  throw new Error('Pas de données TikWM POST');
+}
+
+// API 3: RapidAPI (dernier recours)
+async function fetchFromRapidAPI(username) {
+  console.log('🔧 [API 3] RapidAPI...');
+  
+  if (!process.env.RAPIDAPI_KEY) {
+    throw new Error('RAPIDAPI_KEY non configurée');
+  }
+  
+  const response = await axios.get(
+    'https://tiktok-scraper7.p.rapidapi.com/user/info',
+    {
       params: { unique_id: username },
       headers: {
         'x-rapidapi-key': process.env.RAPIDAPI_KEY,
         'x-rapidapi-host': 'tiktok-scraper7.p.rapidapi.com'
       },
       timeout: 15000
+    }
+  );
+  
+  if (response.data?.data?.user) {
+    const userData = response.data.data;
+    console.log('✅ [API 3] RapidAPI - Utilisateur trouvé:', userData.user.nickname);
+    
+    return {
+      id: userData.user.id,
+      uniqueId: userData.user.uniqueId || username,
+      nickname: userData.user.nickname,
+      avatarLarger: userData.user.avatarLarger || userData.user.avatarMedium,
+      avatarMedium: userData.user.avatarMedium,
+      signature: userData.user.signature,
+      followerCount: userData.stats?.followerCount || 0,
+      followingCount: userData.stats?.followingCount || 0,
+      heartCount: userData.stats?.heartCount || userData.stats?.heart || 0,
+      videoCount: userData.stats?.videoCount || 0,
+      verified: userData.user.verified || false
     };
-
-    const response = await axios.request(options);
-    
-    console.log('✅ RapidAPI - Réponse reçue');
-    
-    if (response.data && response.data.data && response.data.data.user) {
-      const userData = response.data.data;
-      console.log('✅ RapidAPI - Utilisateur trouvé:', userData.user.nickname);
-      
-      return {
-        id: userData.user.id,
-        uniqueId: userData.user.uniqueId || username,
-        nickname: userData.user.nickname,
-        avatarLarger: userData.user.avatarLarger || userData.user.avatarMedium,
-        avatarMedium: userData.user.avatarMedium,
-        signature: userData.user.signature,
-        followerCount: userData.stats?.followerCount || 0,
-        followingCount: userData.stats?.followingCount || 0,
-        heartCount: userData.stats?.heartCount || userData.stats?.heart || 0,
-        videoCount: userData.stats?.videoCount || 0,
-        verified: userData.user.verified || false
-      };
-    }
-    
-    console.log('❌ RapidAPI - Pas de données utilisateur');
-    return null;
-    
-  } catch (error) {
-    console.error('❌ Erreur RapidAPI:', error.message);
-    if (error.response) {
-      console.error('📋 Status:', error.response.status);
-      console.error('📋 Data:', JSON.stringify(error.response.data).substring(0, 300));
-    }
-    throw new Error('Impossible de récupérer les infos du compte (TikWM et RapidAPI ont échoué)');
   }
+  
+  throw new Error('Pas de données RapidAPI');
 }
 
-async function fetchTikTokUserVideos(username, maxVideos = 10) {
-  try {
-    const url = `https://www.tikwm.com/api/user/posts?unique_id=${username}&count=${maxVideos}`;
-    
-    console.log('📡 TikWM - Récupération des vidéos...');
-    const response = await axios.get(url, { timeout: 10000 });
-    
-    if (response.data && response.data.data && response.data.data.videos) {
-      console.log('✅ TikWM - Vidéos trouvées:', response.data.data.videos.length);
-      return response.data.data.videos;
+// FONCTION PRINCIPALE USER INFO avec fallback multi-API
+async function fetchTikTokUserInfo(username) {
+  console.log('🔍 Récupération du compte TikTok:', username);
+  
+  const apis = [
+    { name: 'TikWM Principal', fn: () => fetchFromTikWM(username) },
+    { name: 'TikWM POST', fn: () => fetchFromTikWM2(username) },
+    { name: 'RapidAPI', fn: () => fetchFromRapidAPI(username) }
+  ];
+  
+  for (const api of apis) {
+    try {
+      const result = await withRetry(api.fn, 1, 2000);
+      if (result) {
+        console.log(`✅ Succès avec ${api.name}`);
+        return result;
+      }
+    } catch (error) {
+      console.error(`❌ ${api.name} échoué:`, error.message);
     }
-    
-    console.log('⚠️ TikWM - Pas de vidéos, tentative RapidAPI...');
-    throw new Error('Pas de vidéos TikWM');
-    
-  } catch (tikwmError) {
-    console.error('❌ Erreur TikWM vidéos:', tikwmError.message);
-    console.log('🔄 Fallback vers RapidAPI pour les vidéos...');
-    
-    return await fetchTikTokUserVideosRapidAPI(username, maxVideos);
   }
+  
+  throw new Error('Impossible de récupérer les infos du compte. Toutes les APIs ont échoué. Veuillez réessayer dans quelques minutes.');
 }
 
-async function fetchTikTokUserVideosRapidAPI(username, maxVideos = 10) {
-  try {
-    console.log('🔧 RapidAPI - Récupération des vidéos...');
+// ============================================
+// FONCTIONS VIDEOS
+// ============================================
+
+// API 1: TikWM Videos via endpoint feed
+async function fetchVideosFromTikWM(username, maxVideos) {
+  console.log('🔧 [API 1] TikWM Videos Feed...');
+  
+  // Utiliser l'endpoint feed au lieu de posts
+  const response = await axios.get(
+    `https://www.tikwm.com/api/user/posts?unique_id=${username}&count=${maxVideos}&cursor=0`,
+    { 
+      timeout: 25000,
+      headers: {
+        ...browserHeaders,
+        'Cookie': 'tt_webid=1234567890123456789',
+        'Accept-Encoding': 'gzip, deflate, br'
+      }
+    }
+  );
+  
+  if (response.data?.data?.videos?.length > 0) {
+    console.log('✅ [API 1] TikWM Feed - Vidéos trouvées:', response.data.data.videos.length);
+    return response.data.data.videos;
+  }
+  
+  throw new Error('Pas de vidéos TikWM Feed');
+}
+
+// API 2: TikWM via URL directe (méthode alternative)
+async function fetchVideosFromTikWM2(username, maxVideos) {
+  console.log('🔧 [API 2] TikWM URL Method...');
+  
+  // D'abord récupérer l'ID de l'utilisateur
+  const userResponse = await axios.get(
+    `https://www.tikwm.com/api/user/info?unique_id=${username}`,
+    { 
+      timeout: 15000,
+      headers: browserHeaders
+    }
+  );
+  
+  const secUid = userResponse.data?.data?.user?.secUid;
+  
+  if (!secUid) {
+    throw new Error('SecUid non trouvé');
+  }
+  
+  // Utiliser le secUid pour récupérer les vidéos
+  const videosResponse = await axios.post(
+    'https://www.tikwm.com/api/user/posts',
+    `unique_id=${username}&count=${maxVideos}&cursor=0&secUid=${secUid}`,
+    { 
+      timeout: 25000,
+      headers: {
+        ...browserHeaders,
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Cookie': 'tt_webid=1234567890123456789'
+      }
+    }
+  );
+  
+  if (videosResponse.data?.data?.videos?.length > 0) {
+    console.log('✅ [API 2] TikWM SecUid - Vidéos trouvées:', videosResponse.data.data.videos.length);
+    return videosResponse.data.data.videos;
+  }
+  
+  throw new Error('Pas de vidéos TikWM SecUid');
+}
+
+// API 3: Scrape direct TikTok (via proxy tikwm)
+async function fetchVideosFromTikWMProxy(username, maxVideos) {
+  console.log('🔧 [API 3] TikWM Proxy...');
+  
+  const tiktokUrl = `https://www.tiktok.com/@${username}`;
+  
+  const response = await axios.get(
+    `https://www.tikwm.com/api/?url=${encodeURIComponent(tiktokUrl)}&count=${maxVideos}`,
+    { 
+      timeout: 25000,
+      headers: browserHeaders
+    }
+  );
+  
+  // Cette API retourne les infos différemment
+  if (response.data?.data) {
+    const data = response.data.data;
     
-    const options = {
-      method: 'GET',
-      url: 'https://tiktok-scraper7.p.rapidapi.com/user/posts',
-      params: { 
-        unique_id: username,
-        count: maxVideos.toString()
-      },
+    // Si c'est une vidéo unique, on peut au moins avoir ça
+    if (data.id) {
+      console.log('✅ [API 3] TikWM Proxy - 1 vidéo trouvée');
+      return [{
+        video_id: data.id,
+        title: data.title || '',
+        cover: data.cover || data.origin_cover,
+        duration: data.duration,
+        play_count: data.play_count || 0,
+        digg_count: data.digg_count || 0,
+        comment_count: data.comment_count || 0,
+        share_count: data.share_count || 0,
+        create_time: data.create_time
+      }];
+    }
+  }
+  
+  throw new Error('Pas de vidéos TikWM Proxy');
+}
+
+// API 4: RapidAPI Videos
+async function fetchVideosFromRapidAPI(username, maxVideos) {
+  console.log('🔧 [API 4] RapidAPI Videos...');
+  
+  if (!process.env.RAPIDAPI_KEY) {
+    throw new Error('RAPIDAPI_KEY non configurée');
+  }
+  
+  const response = await axios.get(
+    'https://tiktok-scraper7.p.rapidapi.com/user/posts',
+    {
+      params: { unique_id: username, count: maxVideos.toString() },
       headers: {
         'x-rapidapi-key': process.env.RAPIDAPI_KEY,
         'x-rapidapi-host': 'tiktok-scraper7.p.rapidapi.com'
       },
       timeout: 15000
-    };
-
-    const response = await axios.request(options);
-    
-    if (response.data && response.data.data && response.data.data.videos) {
-      const videos = response.data.data.videos;
-      console.log('✅ RapidAPI - Vidéos trouvées:', videos.length);
-      
-      return videos.map(v => ({
-        video_id: v.video_id || v.id,
-        title: v.title || v.desc || '',
-        cover: v.cover || v.origin_cover,
-        duration: v.duration,
-        play_count: v.play_count || v.playCount || 0,
-        digg_count: v.digg_count || v.diggCount || 0,
-        comment_count: v.comment_count || v.commentCount || 0,
-        share_count: v.share_count || v.shareCount || 0,
-        create_time: v.create_time || v.createTime
-      }));
     }
+  );
+  
+  if (response.data?.data?.videos?.length > 0) {
+    const videos = response.data.data.videos;
+    console.log('✅ [API 4] RapidAPI - Vidéos trouvées:', videos.length);
     
-    console.log('⚠️ RapidAPI - Pas de vidéos trouvées');
-    return [];
-    
-  } catch (error) {
-    console.error('❌ Erreur RapidAPI vidéos:', error.message);
-    if (error.response) {
-      console.error('📋 Status:', error.response.status);
-    }
-    return [];
+    return videos.map(v => ({
+      video_id: v.video_id || v.id,
+      title: v.title || v.desc || '',
+      cover: v.cover || v.origin_cover,
+      duration: v.duration,
+      play_count: v.play_count || v.playCount || 0,
+      digg_count: v.digg_count || v.diggCount || 0,
+      comment_count: v.comment_count || v.commentCount || 0,
+      share_count: v.share_count || v.shareCount || 0,
+      create_time: v.create_time || v.createTime
+    }));
   }
+  
+  throw new Error('Pas de vidéos RapidAPI');
+}
+
+// API 5: TikAPI.io pour les vidéos
+async function fetchVideosFromTikAPI(username, maxVideos) {
+  console.log('🔧 [API 5] TikAPI Videos...');
+  
+  const response = await axios.get(
+    `https://api16-normal-c-useast1a.tiktokv.com/aweme/v1/feed/?user_id=${username}&count=${maxVideos}`,
+    { 
+      timeout: 15000,
+      headers: {
+        'User-Agent': 'TikTok 26.2.0 rv:262018 (iPhone; iOS 14.4.2; en_US) Cronet'
+      }
+    }
+  );
+  
+  if (response.data?.aweme_list?.length > 0) {
+    console.log('✅ [API 5] TikAPI - Vidéos trouvées:', response.data.aweme_list.length);
+    return response.data.aweme_list.map(v => ({
+      video_id: v.aweme_id,
+      title: v.desc || '',
+      cover: v.video?.cover?.url_list?.[0] || '',
+      duration: v.video?.duration || 0,
+      play_count: v.statistics?.play_count || 0,
+      digg_count: v.statistics?.digg_count || 0,
+      comment_count: v.statistics?.comment_count || 0,
+      share_count: v.statistics?.share_count || 0,
+      create_time: v.create_time
+    }));
+  }
+  
+  throw new Error('Pas de vidéos TikAPI');
+}
+
+// FONCTION PRINCIPALE VIDEOS avec fallback
+async function fetchTikTokUserVideos(username, maxVideos = 10) {
+  console.log('📹 Récupération des vidéos pour:', username);
+  
+  const apis = [
+    { name: 'TikWM Videos Feed', fn: () => fetchVideosFromTikWM(username, maxVideos) },
+    { name: 'TikWM SecUid', fn: () => fetchVideosFromTikWM2(username, maxVideos) },
+    { name: 'TikWM Proxy', fn: () => fetchVideosFromTikWMProxy(username, maxVideos) },
+    { name: 'RapidAPI Videos', fn: () => fetchVideosFromRapidAPI(username, maxVideos) },
+    { name: 'TikAPI Videos', fn: () => fetchVideosFromTikAPI(username, maxVideos) }
+  ];
+  
+  for (const api of apis) {
+    try {
+      const result = await withRetry(api.fn, 1, 2000);
+      if (result && result.length > 0) {
+        console.log(`✅ Vidéos récupérées avec ${api.name}: ${result.length} vidéos`);
+        return result;
+      }
+    } catch (error) {
+      console.error(`❌ ${api.name} échoué:`, error.message);
+    }
+  }
+  
+  console.log('⚠️ Aucune vidéo récupérée, retour tableau vide');
+  return [];
 }
 
 // ============================================
