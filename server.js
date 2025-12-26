@@ -2902,6 +2902,45 @@ app.post('/api/analyze-tracked-account', async (req, res) => {
 });
 
 // ============================================
+// ROUTE : GET /api/account-videos/:username
+// Pour la page Statistiques - récupère les vidéos d'un compte
+// ============================================
+app.get('/api/account-videos/:username', async (req, res) => {
+  try {
+    const { username } = req.params;
+    const count = parseInt(req.query.count) || 35;
+    
+    console.log(`📹 [Statistics] Récupération des vidéos pour @${username}`);
+    
+    const videos = await fetchTikTokUserVideos(username, count);
+    
+    console.log(`✅ [Statistics] ${videos.length} vidéos récupérées pour @${username}`);
+    
+    return res.status(200).json({
+      success: true,
+      videos: videos.map(v => ({
+        video_id: v.video_id || v.id,
+        title: v.title || v.desc || '',
+        cover: v.cover || v.origin_cover,
+        play: v.play || v.playUrl || '',
+        duration: v.duration || 0,
+        play_count: v.play_count || v.playCount || 0,
+        digg_count: v.digg_count || v.diggCount || 0,
+        comment_count: v.comment_count || v.commentCount || 0,
+        share_count: v.share_count || v.shareCount || 0,
+        collect_count: v.collect_count || v.collectCount || 0,
+        create_time: v.create_time || v.createTime || 0
+      }))
+    });
+    
+  } catch (error) {
+    console.error('❌ [Statistics] Erreur:', error.message);
+    return res.status(500).json({ error: error.message, videos: [] });
+  }
+});
+
+
+// ============================================
 // DÉMARRER LE SERVEUR
 // ============================================
 app.listen(PORT, () => {
