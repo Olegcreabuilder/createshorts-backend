@@ -3136,6 +3136,25 @@ app.delete('/api/favorited-accounts', async (req, res) => {
   }
 });
 
+// ALIAS ROUTE
+app.get('/api/compte-monetise', async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('monetizable_accounts')
+      .select('*')
+      .order('created_at', { ascending: false });
+
+    if (error) throw error;
+
+    res.json({ success: true, data: data });
+
+  } catch (error) {
+    console.error('❌ Erreur:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+
 // ============================================
 // DÉMARRER LE SERVEUR
 // ============================================
