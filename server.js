@@ -2939,6 +2939,202 @@ app.get('/api/account-videos/:username', async (req, res) => {
   }
 });
 
+// ============================================
+// SETUP ROUTES - Comptes Monétisés
+// ============================================
+// Import des nouvelles routes avec VRAIES données TikTok
+import { setupMonetizableRoutes } from './routes-monetizable.js';
+
+// ...plus bas, avant app.listen()...
+
+setupMonetizableRoutes(app, supabase, fetchTikTokUserInfo, fetchTikTokUserVideos);
+
+console.log('✅ Routes comptes monétisés activées');
+
+// ============================================
+// À AJOUTER DANS server.js
+// Variable globale pour tracker la progression
+// ============================================
+
+// Objet pour tracker la progression du refresh
+let loadProgress = {
+  isLoading: false,
+  accountsProcessed: 0,
+  totalAccounts: 0,
+  currentAccount: '',
+  stage: 'idle' // idle, connecting, fetching, analyzing, preparing
+};
+
+// 🔄 ROUTE POUR ÉCOUTER LA PROGRESSION (SSE)
+app.get('/api/monetizable-accounts/progress', (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+
+  // Envoyer la progression actuelle toutes les 500ms
+  const interval = setInterval(() => {
+    if (loadProgress.isLoading) {
+      const percentage = loadProgress.totalAccounts > 0 
+        ? Math.round((loadProgress.accountsProcessed / loadProgress.totalAccounts) * 100)
+        : 0;
+
+      res.write(`data: ${JSON.stringify({
+        percentage,
+        accountsProcessed: loadProgress.accountsProcessed,
+        totalAccounts: loadProgress.totalAccounts,
+        currentAccount: loadProgress.currentAccount,
+        stage: loadProgress.stage
+      })}\n\n`);
+    } else {
+      // Si pas en train de charger, arrêter
+      clearInterval(interval);
+      res.write(`data: ${JSON.stringify({ complete: true })}\n\n`);
+      res.end();
+    }
+  }, 500);
+
+  req.on('close', () => {
+    clearInterval(interval);
+    res.end();
+  });
+});
+
+// ============================================
+// MODIFIER LA ROUTE POST /refresh
+// ============================================
+
+// AVANT :
+/*
+app.post('/api/monetizable-accounts/refresh', async (req, res) => {
+  const accounts = await fetchAllMonetizableAccounts(...);
+  res.json({ ...data });
+});
+*/
+
+// APRÈS :
+app.post('/api/monetizable-accounts/refresh', async (req, res) => {
+  // Marquer comme en cours de chargement
+  loadProgress = {
+    isLoading: true,
+    accountsProcessed: 0,
+    totalAccounts: 31, // nombre total de comptes
+    currentAccount: '',
+    stage: 'connecting'
+  };
+
+  try {
+    // Lancer le fetch des comptes (modifié pour mettre à jour la progression)
+    const accounts = await fetchAllMonetizableAccountsWithProgress(
+      supabase,
+      fetchTikTokUserInfo,
+      fetchTikTokUserVideos,
+      (progress) => {
+        // Callback pour mettre à jour la progression
+        loadProgress = {
+          ...loadProgress,
+          ...progress
+        };
+      }
+    );
+
+    // Marquer comme terminé
+    loadProgress.isLoading = false;
+    loadProgress.stage = 'complete';
+
+    res.json({
+      success: true,
+      message: `✅ ${accounts.length} comptes rafraîchis`,
+      data: accounts
+    });
+
+  } catch (error) {
+    console.error('❌ Erreur refresh:', error);
+    loadProgress.isLoading = false;
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============================================
+// À AJOUTER DANS server.js
+// ROUTES POUR LES COMPTES FAVORIS
+// ============================================
+
+// 📌 GET tous les favoris
+app.get('/api/favorited-accounts', async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('favorited_accounts')
+      .select('*')
+      .order('saved_at', { ascending: false });
+
+    if (error) throw error;
+
+    console.log(`✅ ${data.length} favoris récupérés`);
+    res.json(data);
+
+  } catch (error) {
+    console.error('❌ Erreur GET favoris:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 📌 POST - Ajouter un favori
+app.post('/api/favorited-accounts', async (req, res) => {
+  try {
+    const { username, account_data } = req.body;
+
+    if (!username || !account_data) {
+      return res.status(400).json({ error: 'Username et account_data requis' });
+    }
+
+    const { data, error } = await supabase
+      .from('favorited_accounts')
+      .upsert(
+        {
+          username,
+          account_data,
+          saved_at: new Date().toISOString()
+        },
+        { onConflict: 'username' }
+      )
+      .select();
+
+    if (error) throw error;
+
+    console.log(`❤️ Favori ajouté: @${username}`);
+    res.json({ success: true, data: data[0] });
+
+  } catch (error) {
+    console.error('❌ Erreur POST favori:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 📌 DELETE - Supprimer un favori
+app.delete('/api/favorited-accounts', async (req, res) => {
+  try {
+    const { username } = req.body;
+
+    if (!username) {
+      return res.status(400).json({ error: 'Username requis' });
+    }
+
+    const { error } = await supabase
+      .from('favorited_accounts')
+      .delete()
+      .eq('username', username);
+
+    if (error) throw error;
+
+    console.log(`💔 Favori supprimé: @${username}`);
+    res.json({ success: true, message: 'Favori supprimé' });
+
+  } catch (error) {
+    console.error('❌ Erreur DELETE favori:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
 
 // ============================================
 // DÉMARRER LE SERVEUR
