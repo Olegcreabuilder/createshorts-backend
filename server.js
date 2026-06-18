@@ -3136,13 +3136,12 @@ app.delete('/api/favorited-accounts', async (req, res) => {
   }
 });
 
-// ALIAS ROUTE
+// ALIAS ROUTE - CORRIGÉE
 app.get('/api/compte-monetise', async (req, res) => {
   try {
     const { data, error } = await supabase
       .from('monetizable_accounts')
-      .select('*')
-      .order('created_at', { ascending: false });
+      .select('*');
 
     if (error) throw error;
 
