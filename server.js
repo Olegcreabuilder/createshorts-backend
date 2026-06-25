@@ -1728,8 +1728,18 @@ RETOURNE UNIQUEMENT LE JSON.`;
 // ============================================
 // FONCTION : Générer un script personnalisé (800-1500 caractères)
 // ============================================
-async function generatePersonalizedScript(title, description, category, transcriptions, niche, account) {
+async function generatePersonalizedScript(
+  title, 
+  description, 
+  category, 
+  transcriptions, 
+  niche, 
+  account,
+  options = {}
+) {
   try {
+    const { theme, tone, duration, relatedToContent = true } = options;
+    
     const existingScripts = transcriptions.map(t => t.transcription).slice(0, 5);
     
     const sortedTranscriptions = [...transcriptions].sort((a, b) => b.views - a.views);
@@ -1737,69 +1747,113 @@ async function generatePersonalizedScript(title, description, category, transcri
       script: t.transcription,
       views: t.views
     }));
-
+ 
     const prompt = `Tu es un expert en copywriting pour TikTok. Génère un script COMPLET et PERSONNALISÉ.
-
+ 
 **CRÉATEUR : @${account.tiktok_username}**
 - Niche : ${niche}
 - Followers : ${account.followers_count?.toLocaleString() || 'N/A'}
-
+ 
 **IDÉE À SCRIPTER :**
 - Titre : "${title}"
 - Description : ${description}
 - Catégorie : ${category}
-
+${theme ? `- Thématique : ${theme}` : ''}
+${tone ? `- Ton : ${tone}` : ''}
+${duration ? `- Durée : ${duration} secondes` : ''}
+ 
 **SCRIPTS LES PLUS PERFORMANTS DU CRÉATEUR (pour copier le style) :**
 ${topScripts.map((s, i) => `
 --- SCRIPT ${i + 1} (${s.views.toLocaleString()} vues) ---
 ${s.script}
 `).join('\n')}
-
+ 
 **TOUS LES SCRIPTS POUR LE STYLE :**
 ${existingScripts.join('\n\n---\n\n').substring(0, 2500)}
-
+ 
 ---
-
+ 
+**⚠️ INSTRUCTIONS CRUCIALES :**
+ 
+${
+  !relatedToContent 
+    ? `
+🔴 **IMPORTANT - SCRIPT COMPLÈTEMENT DIFFÉRENT DU CONTENU ACTUEL :**
+ 
+Ce script doit traiter de : **${theme || title}**
+ 
+**INTERDICTION ABSOLUE :**
+- ❌ N'inclure AUCUNE référence à : ${niche}
+- ❌ N'inclure aucun élément du contenu actuel du créateur
+- ❌ Ne pas mélanger avec le sujet habituel
+- ❌ C'est un NOUVEAU sujet, TOTALEMENT DIFFÉRENT
+ 
+**Le script doit :**
+- ✅ Traiter UNIQUEMENT de : **${theme || title}**
+- ✅ Être cohérent et autonome
+- ✅ Ne pas mentionner ou référencer ${niche}
+- ✅ Sonner comme le créateur parle, mais sur un sujet DIFFÉRENT
+    `
+    : `
+🟢 **SCRIPT LIÉ AU CONTENU ACTUEL :**
+ 
+Ce script peut référencer ou combiner avec : ${niche}
+ 
+- ✅ Peut inclure des éléments du contenu actuel
+- ✅ Peut faire des liens avec ${niche}
+- ✅ Doit rester cohérent avec la niche actuelle
+    `
+}
+ 
+---
+ 
 **TA MISSION :**
-
+ 
 Génère un script COMPLET de **800 à 1500 caractères** qui :
-
+ 
 1. **COPIE EXACTEMENT LE STYLE** du créateur :
    - Même vocabulaire (argot, expressions, anglicismes si utilisés)
    - Même façon de s'adresser à l'audience
    - Mêmes tics de langage et expressions favorites
    - Même rythme de phrases
    - Même ton (humour, sérieux, provocation, etc.)
-
+ 
 2. **STRUCTURE EFFICACE** :
    - **HOOK (0-3 sec)** : Accroche percutante qui stoppe le scroll
    - **TENSION (3-15 sec)** : Créer de la curiosité, un enjeu
    - **CONTENU (15-45 sec)** : La valeur, l'information, l'histoire
    - **CTA (fin)** : Appel à l'action naturel (follow, like, commentaire)
-
+ 
 3. **FORMAT DU SCRIPT** :
    - Écrit comme le créateur PARLE (pas comme il écrit)
    - Phrases courtes et percutantes
    - Pauses naturelles indiquées par "..."
    - Émotions et intonations entre [crochets] si pertinent
-
+ 
 ---
-
+ 
 **RÈGLES ABSOLUES :**
 - Le script doit faire entre 800 et 1500 caractères
 - Il doit sonner EXACTEMENT comme le créateur parle
 - Pas de langage générique ou corporate
 - Des phrases punchy, pas de blabla
 - Adapté au format vertical TikTok
-
+${!relatedToContent ? `- 🔴 AUCUNE référence à ${niche} - C'est CRUCIAL !` : ''}
+ 
 RETOURNE UNIQUEMENT LE SCRIPT (pas de JSON, pas d'explication).`;
-
+ 
     const completion = await openai.chat.completions.create({
       model: 'gpt-4o',
       messages: [
         {
           role: 'system',
-          content: `Tu es un copywriter expert en TikTok. Tu dois écrire des scripts qui sonnent EXACTEMENT comme le créateur parle - pas comme un robot ou un marketeur.`
+          content: `Tu es un copywriter expert en TikTok. Tu dois écrire des scripts qui sonnent EXACTEMENT comme le créateur parle - pas comme un robot ou un marketeur.
+ 
+${
+  !relatedToContent 
+    ? `⚠️ POINT CRITIQUE : Quand le créateur dit "NON" au lien avec le contenu actuel, tu DOIS générer un script sur un sujet COMPLÈTEMENT DIFFÉRENT, SANS AUCUNE RÉFÉRENCE au contenu habituel.`
+    : ''
+}`
         },
         {
           role: 'user',
@@ -1809,95 +1863,97 @@ RETOURNE UNIQUEMENT LE SCRIPT (pas de JSON, pas d'explication).`;
       temperature: 0.85,
       max_tokens: 1500
     });
-
+ 
     let script = completion.choices[0].message.content.trim();
+    
+    console.log(`✅ Script généré (${script.length} caractères) - Lié au contenu: ${relatedToContent ? 'OUI' : 'NON'}`);
+    
     return script;
-
+ 
   } catch (error) {
     console.error('❌ Erreur génération script IA:', error);
     throw error;
   }
 }
-
 // ============================================
 // ROUTE : POST /api/generate-content-ideas
 // ============================================
-app.post('/api/generate-content-ideas', async (req, res) => {
+app.post('/api/generate-script', async (req, res) => {
   try {
     const authHeader = req.headers.authorization;
+    const { 
+      ideaId, 
+      ideaTitle, 
+      ideaDescription, 
+      ideaCategory,
+      theme,
+      tone,
+      duration,
+      relatedToContent
+    } = req.body;
     
     if (!authHeader) {
       return res.status(401).json({ error: 'Non authentifié' });
     }
-
+ 
     const token = authHeader.replace('Bearer ', '');
     const { data: { user }, error: authError } = await supabase.auth.getUser(token);
     
     if (authError || !user) {
       return res.status(401).json({ error: 'Non authentifié' });
     }
-
-    console.log('💡 Génération d\'idées de contenu pour:', user.id);
-
-    // Récupérer le compte connecté
+ 
+    console.log('📝 Génération de script pour:', ideaTitle);
+    console.log(`📌 relatedToContent: ${relatedToContent} (Lié au contenu: ${relatedToContent ? 'OUI' : 'NON'})`);
+ 
+    // Récupérer le compte et les transcriptions
     const { data: account, error: accountError } = await supabase
       .from('connected_accounts')
       .select('*')
       .eq('user_id', user.id)
       .eq('is_connected', true)
       .single();
-
+ 
     if (accountError || !account) {
       return res.status(404).json({ error: 'Aucun compte TikTok connecté' });
     }
-
-    const username = account.tiktok_username;
+ 
+    const transcriptions = account.last_transcriptions || [];
     const niche = account.niche || 'Contenu Général';
-    
-    console.log(`📊 Compte: @${username}, Niche: ${niche}`);
-
-    // Récupérer les vidéos
-    const videos = await fetchTikTokUserVideos(username, 15);
-    
-    if (videos.length === 0) {
-      return res.status(404).json({ error: 'Aucune vidéo trouvée' });
-    }
-
-    console.log(`📹 ${videos.length} vidéos récupérées, début transcription...`);
-
-    // Transcrire les vidéos (peut prendre du temps)
-    const transcriptions = await transcribeMultipleVideos(videos, username, 10);
-
+ 
     if (transcriptions.length === 0) {
-      return res.status(500).json({ error: 'Impossible de transcrire les vidéos' });
+      return res.status(400).json({ error: 'Veuillez d\'abord analyser vos vidéos' });
     }
-
-    // Analyser le style et générer des idées
-    const ideas = await generatePersonalizedIdeas(transcriptions, niche, account);
-
-    console.log(`✅ ${ideas.ideas?.length || 0} idées générées`);
-
-    // Sauvegarder les transcriptions pour usage ultérieur
-    await supabase
-      .from('connected_accounts')
-      .update({
-        last_transcriptions: transcriptions,
-        transcriptions_updated_at: new Date().toISOString()
-      })
-      .eq('user_id', user.id);
-
+ 
+    const script = await generatePersonalizedScript(
+      ideaTitle,
+      ideaDescription,
+      ideaCategory,
+      transcriptions,
+      niche,
+      account,
+      {
+        theme,
+        tone,
+        duration,
+        relatedToContent
+      }
+    );
+ 
+    console.log(`✅ Script généré (${script.length} caractères)`);
+ 
     return res.status(200).json({
       success: true,
-      ideas,
-      transcriptionsCount: transcriptions.length,
-      niche
+      script,
+      characterCount: script.length
     });
-
+ 
   } catch (error) {
-    console.error('❌ Erreur génération idées:', error);
+    console.error('❌ Erreur génération script:', error);
     return res.status(500).json({ error: error.message });
   }
 });
+
 
 // ============================================
 // ROUTE : POST /api/generate-script
@@ -1905,7 +1961,16 @@ app.post('/api/generate-content-ideas', async (req, res) => {
 app.post('/api/generate-script', async (req, res) => {
   try {
     const authHeader = req.headers.authorization;
-    const { ideaId, ideaTitle, ideaDescription, ideaCategory } = req.body;
+    const { 
+      ideaId, 
+      ideaTitle, 
+      ideaDescription, 
+      ideaCategory,
+      theme,
+      tone,
+      duration,
+      relatedToContent  // ✅ AJOUTER CETTE LIGNE
+    } = req.body;
     
     if (!authHeader) {
       return res.status(401).json({ error: 'Non authentifié' });
@@ -1946,7 +2011,13 @@ app.post('/api/generate-script', async (req, res) => {
       ideaCategory,
       transcriptions,
       niche,
-      account
+      account,
+      {  // ✅ AJOUTER CET OBJET
+        theme,
+        tone,
+        duration,
+        relatedToContent
+      }
     );
 
     console.log(`✅ Script généré (${script.length} caractères)`);
@@ -2249,6 +2320,9 @@ app.get('/api/user-videos', async (req, res) => {
 // ============================================
 // ROUTE : POST /api/analyze-video
 // ============================================
+// ============================================
+// ROUTE : POST /api/analyze-video (AMÉLIORÉ - Multi-fallback)
+// ============================================
 app.post('/api/analyze-video', async (req, res) => {
   try {
     const authHeader = req.headers.authorization;
@@ -2267,22 +2341,117 @@ app.post('/api/analyze-video', async (req, res) => {
 
     console.log('🎬 Analyse vidéo demandée:', videoUrl);
 
-    const videoIdMatch = videoUrl.match(/video\/(\d+)/);
-    if (!videoIdMatch) {
-      return res.status(400).json({ error: 'URL TikTok invalide' });
+    // ✅ Validation URL TikTok (supporte URL longue ET courte)
+    const isLongUrl = /tiktok\.com\/@[\w.-]+\/video\/\d+/i.test(videoUrl);
+    const isShortUrl = /(vm|vt)\.tiktok\.com\//i.test(videoUrl);
+    
+    if (!isLongUrl && !isShortUrl) {
+      return res.status(400).json({ 
+        error: 'URL TikTok invalide. Utilisez un lien complet (tiktok.com/@user/video/...) ou court (vm.tiktok.com/...)' 
+      });
     }
 
-    const videoId = videoIdMatch[1];
+    // ✅ Nettoyer l'URL (enlever les query params parasites)
+let cleanVideoUrl = videoUrl;
+const videoIdMatch = videoUrl.match(/\/video\/(\d+)/);
+if (videoIdMatch) {
+  const usernameMatch = videoUrl.match(/@([\w.-]+)/);
+  const username = usernameMatch ? usernameMatch[1] : '';
+  cleanVideoUrl = `https://www.tiktok.com/@${username}/video/${videoIdMatch[1]}`;
+  console.log('🧹 URL nettoyée:', cleanVideoUrl);
+}
 
-    const videoInfoUrl = `https://www.tikwm.com/api/?url=${encodeURIComponent(videoUrl)}`;
-    const response = await axios.get(videoInfoUrl);
+    // ✅ Récupérer les infos via plusieurs APIs (avec fallback)
+    let videoData = null;
+    let lastError = null;
 
-    if (!response.data || !response.data.data) {
-      return res.status(404).json({ error: 'Vidéo introuvable' });
+    // API 1: TikWM avec headers navigateur
+    try {
+      console.log('🔧 [API 1] TikWM GET avec headers...');
+      const response = await axios.get(
+        `https://www.tikwm.com/api/?url=${encodeURIComponent(cleanVideoUrl)}&hd=1`,
+        {
+          timeout: 20000,
+          headers: browserHeaders
+        }
+      );
+      
+      if (response.data?.data?.id) {
+        videoData = response.data.data;
+        console.log('✅ [API 1] TikWM - Vidéo trouvée:', videoData.id);
+      } else {
+        console.log('⚠️ [API 1] TikWM réponse vide ou erreur:', response.data?.code, response.data?.msg);
+        throw new Error(response.data?.msg || 'Pas de données TikWM');
+      }
+    } catch (error) {
+      console.error('❌ [API 1] TikWM GET échoué:', error.message);
+      lastError = error;
     }
 
-    const videoData = response.data.data;
+    // API 2: TikWM POST (méthode alternative)
+    if (!videoData) {
+      try {
+        console.log('🔧 [API 2] TikWM POST...');
+        const response = await axios.post(
+          'https://www.tikwm.com/api/',
+          `url=${encodeURIComponent(cleanvideoUrl)}&hd=1`,
+          {
+            timeout: 20000,
+            headers: {
+              ...browserHeaders,
+              'Content-Type': 'application/x-www-form-urlencoded'
+            }
+          }
+        );
+        
+        if (response.data?.data?.id) {
+          videoData = response.data.data;
+          console.log('✅ [API 2] TikWM POST - Vidéo trouvée:', videoData.id);
+        } else {
+          throw new Error(response.data?.msg || 'Pas de données TikWM POST');
+        }
+      } catch (error) {
+        console.error('❌ [API 2] TikWM POST échoué:', error.message);
+        lastError = error;
+      }
+    }
 
+    // API 3: RapidAPI (dernier recours)
+    if (!videoData && process.env.RAPIDAPI_KEY) {
+      try {
+        console.log('🔧 [API 3] RapidAPI...');
+        const response = await axios.get(
+          'https://tiktok-scraper7.p.rapidapi.com/',
+          {
+            params: { url: cleanvideoUrl, hd: '1' },
+            headers: {
+              'x-rapidapi-key': process.env.RAPIDAPI_KEY,
+              'x-rapidapi-host': 'tiktok-scraper7.p.rapidapi.com'
+            },
+            timeout: 15000
+          }
+        );
+        
+        if (response.data?.data?.id) {
+          videoData = response.data.data;
+          console.log('✅ [API 3] RapidAPI - Vidéo trouvée:', videoData.id);
+        }
+      } catch (error) {
+        console.error('❌ [API 3] RapidAPI échoué:', error.message);
+        lastError = error;
+      }
+    }
+
+    // ❌ Aucune API n'a réussi
+    if (!videoData) {
+      console.error('❌ Toutes les APIs ont échoué pour:', cleanvideoUrl);
+      return res.status(404).json({ 
+        error: 'Vidéo introuvable. Vérifie que le lien est correct et que la vidéo est publique.',
+        details: lastError?.message
+      });
+    }
+
+    // ✅ Analyse IA
     const analysis = await analyzeVideoWithAI(videoData);
 
     console.log('✅ Analyse terminée');
